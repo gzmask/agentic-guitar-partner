@@ -27,14 +27,18 @@
 
 (defn- check-setup!
   []
-  (let [ready (configured)
+  (let [profile-prompt (setup/step (setup/initial-state inventory)
+                                   {:type :line :text "1"})
+        ready (configured)
         microphone (-> (setup/initial-state inventory)
                        (setup/step {:type :line :text "2"}))
         cancelled (setup/step microphone {:type :line :text ""})
         mic-ready (-> microphone (setup/step {:type :line :text "y"})
                       (setup/step {:type :line :text ""}))
         fresh (assoc-in inventory [:inputs 0 :id] "adc9")]
-    (verify! "line input proceeds directly with the default profile"
+    (verify! "input selection offers a scale choice before startup"
+             (= :profile (:stage profile-prompt)))
+    (verify! "Enter accepts the default C-major profile"
              (and (= :ready (:stage ready)) (= control/default-profile (:profile ready))))
     (verify! "line input selected by current list" (= "fx" (get-in ready [:input :uid])))
     (verify! "microphone requires headphones" (= :headphones (:stage microphone)))
@@ -45,7 +49,9 @@
              (try (setup/resolve-session (assoc microphone :stage :ready :profile control/default-profile) inventory)
                   false (catch Exception e (= :headphones-required (:type (ex-data e))))))
     (verify! "empty headphone answer is not consent" (= :headphones (:stage cancelled)))
-    (verify! "microphone can finish with explicit confirmation"
+    (verify! "microphone requires headphone consent before scale selection"
+             (= :profile (:stage (setup/step microphone {:type :line :text "y"}))))
+    (verify! "microphone can finish with explicit headphone consent and default scale"
              (and (= :ready (:stage mic-ready)) (:headphones? mic-ready) (not (:monitor? mic-ready))))
     (verify! "volatile device number resolved again by UID"
              (= "adc9" (get-in (setup/resolve-session ready fresh) [:input :id])))
@@ -56,8 +62,8 @@
                   (catch Exception e (= :device-unavailable (:type (ex-data e)))))))
   (let [custom (-> (setup/initial-state inventory)
                    (setup/step {:type :line :text "1"})
-                   (assoc :stage :profile)
                    (setup/step {:type :line :text "2"}))
+        custom-preview (setup/step custom {:type :capture-unavailable})
         scale (reduce (fn [state [id midi]]
                         (-> state
                             (setup/step {:type :note-on :id id :midi midi :sample (* id 10000)})
@@ -76,6 +82,10 @@
           reset (setup/step scale {:type :gap})]
       (verify! "native double pitches normalize in setup" (= [62] (:scale floating)))
       (verify! "lost event resets the captured wake" (and (= :wake (:stage reset)) (empty? (:wake reset)))))
+    (verify! "custom profile choice starts scale capture" (= :scale (:stage custom)))
+    (verify! "offline custom capture returns to profile choice safely"
+             (and (= :profile (:stage custom-preview))
+                  (str/includes? (:message custom-preview) "--live")))
     (verify! "ascending scale transitions to wake capture" (= :wake (:stage scale)))
     (verify! "wake not accepted before silence" (= :wake (:stage wake)))
     (verify! "one second silence leads to review" (= :review (:stage reviewing)))

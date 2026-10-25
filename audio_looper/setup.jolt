@@ -76,20 +76,23 @@
           (let [input (nth (get-in state [:inventory :inputs]) (dec index))
                 line? (str/includes? (str/lower-case (:name input)) "fx100")]
             (assoc state :input input :monitor? line? :headphones? false :headphones-required? (not line?)
-                   :profile control/default-profile
-                   :stage (if line? :ready :headphones) :message nil))
+                   :profile nil
+                   :stage (if line? :profile :headphones) :message nil))
           (assoc state :message "Select a device from the current list."))
         (assoc state :message "Enter the input's list number, or q."))
       (and (= :line type) (= :headphones stage))
       (if (= "y" (str/lower-case text))
-        (assoc state :headphones? true :monitor? false :profile control/default-profile
-               :stage :ready :message nil)
+        (assoc state :headphones? true :monitor? false :profile nil
+               :stage :profile :message nil)
         (assoc state :message "Headphones are required; type y to confirm or q to quit."))
       (and (= :line type) (= :profile stage))
       (case text
         ("" "1") (assoc state :profile control/default-profile :stage :ready :message nil)
         "2" (assoc state :stage :scale :scale [] :wake [] :held nil :message nil)
-        (assoc state :message "Enter selects C major; 2 selects guitar-driven custom capture."))
+        (assoc state :message "Enter or 1 selects C major; 2 captures a custom scale and wake."))
+      (and (= :capture-unavailable type) (#{:scale :wake} stage))
+      (assoc state :stage :profile :scale [] :wake [] :held nil
+             :message "Custom scale capture requires --live; choose C major or quit.")
       (and (= :line type) (= :review stage))
       (case text
         "" (assoc state :stage :ready :message nil)
@@ -121,10 +124,13 @@
    (let [output (str "Output: " (get-in state [:output :name] "unavailable"))
          message (:message state)
          capture-help (if live-capture?
-                        "LIVE CAPTURE: play clean single notes; c returns to defaults, q quits."
-                        "OFFLINE PREVIEW: detector is not connected; c returns to defaults, q quits.")]
+                        "LIVE CAPTURE: play clean single notes; c returns to profile choice, q quits."
+                        "OFFLINE PREVIEW: no detector; custom capture requires --live, c returns to profile choice.")
+         header (if live-capture?
+                  "AUDIO LOOPER SETUP (--live; custom capture may open input)"
+                  "AUDIO LOOPER SETUP (no audio stream opened by this UI)")]
     (vec (concat
-           ["AUDIO LOOPER SETUP (no audio stream opened by this UI)" output]
+           [header output]
            (case (:stage state)
              :input (concat ["Input device:"]
                             (map-indexed #(str (inc %1) ". " (:name %2) " [" (:channels %2) " channels]")
@@ -133,7 +139,9 @@
              :headphones ["Microphone/unknown input: raw monitoring is OFF."
                           "Use headphones to prevent acoustic feedback. Headphones connected? [y/N]"]
              :profile ["Control setup:" "1. C major; wake = C5 D5 C5 D5 [default]"
-                       "2. Capture custom scale and wake with the guitar" "> [Enter]"]
+                       (if live-capture? "2. Capture custom scale and wake with the guitar"
+                           "2. Custom scale capture requires --live")
+                       "> [Enter] selects C major"]
              :scale [(str "Play ascending scale + octave (8 notes): " (:scale state))
                      capture-help]
              :wake [(str "Play a 3..6-note wake, then one second of silence: " (:wake state))
@@ -148,7 +156,7 @@
 (defn resolve-session
   "Re-resolve volatile adcN/dacN identifiers by stable CoreAudio UID at startup."
   [state current]
-  (when-not (= :ready (:stage state))
+  (when-not (and (= :ready (:stage state)) (:profile state))
     (throw (ex-info "Setup is incomplete." {:type :incomplete-setup})))
   (when (and (:headphones-required? state) (not (:headphones? state)))
     (throw (ex-info "Microphone/unknown input requires explicit headphone confirmation."

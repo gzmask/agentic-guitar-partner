@@ -36,8 +36,8 @@ or a generic benchmark framework unless explicitly requested. There are no
   independent 600-second OS wall-clock alarm.
 - `--live` is the only mode that may open an audio device. `--no-tui` intentionally
   selects line-oriented output; omit it when checking the fixed ANSI dashboard.
-- Input selection is the only mandatory keyboard setup for FX100. The default
-  C-major guitar command profile is octave-independent.
+- Input selection is the only mandatory keyboard setup for FX100. Startup offers
+  C major by default (Enter) or custom scale/wake capture in explicit `--live` mode.
 - Erase is a direct selected-slot command; wake plus degree-7 exit starts the graceful fade immediately, with no extra confirmation or hold.
 - The first/master clip may trim outer silence with documented preroll/tail.
   Later synchronized clips must preserve complete master-cycle phase.

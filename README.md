@@ -43,9 +43,11 @@ jolt guitar-audio-looper.jolt --live
 ```
 
 `--live` is the only mode that opens audio devices. It requires a foreground
-terminal. Select the input with the keyboard; the default C-major control profile
-is then applied automatically. The finite speech cache is generated before the
-audio stream opens, so startup can pause for tens of seconds.
+terminal. Select the input with the keyboard, then choose a control profile:
+press Enter for the default C major, or choose custom scale/wake capture. Custom
+capture opens the selected input with monitoring off; it is only available in
+`--live`. The finite speech cache is generated before any audio stream opens, so
+startup can pause for tens of seconds.
 
 Use `--live --no-tui` only when line-oriented logs are desired. That option
 intentionally disables the fixed dashboard.

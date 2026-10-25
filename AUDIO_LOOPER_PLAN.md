@@ -41,9 +41,10 @@ events, prompt playback/cancellation, and the actual `pitchamdf` lifecycle again
 the pure reference. Every recorded stereo sample is compared with its source.
 
 Only `--live` can open devices. It requires a foreground TTY and fresh UID-based
-device resolution. Input selection is the sole mandatory keyboard setup and uses
-the default C-major profile immediately. A warning is printed, but the explicit
-`--live` invocation replaces the former redundant typed `LIVE` confirmation.
+device resolution. Input selection is the sole mandatory keyboard setup; a
+post-input profile choice defaults to C major on Enter and offers custom scale/wake
+capture in explicit `--live` mode. A warning is printed, but the explicit `--live`
+invocation replaces the former redundant typed `LIVE` confirmation.
 
 ### Stage 1: pure control model
 
@@ -99,12 +100,15 @@ the default C-major profile immediately. A warning is printed, but the explicit
   FFI adapter, with no input/output stream. Device ordering matches the pinned
   Csound 6.18 rtauhal module's separate input/output numbering. Every UTF-8/array
   access is checked against the returned property size; CF strings are released.
-- Selecting the input completes startup with the default C-major profile; no
-  keyboard profile question or typed live confirmation remains. Other/unknown
-  inputs still require explicit headphone confirmation and default monitoring off.
-- The pure setup model retains custom-scale capture logic for offline validation,
-  but startup intentionally does not expose it: octave-independent degree matching
-  makes the default C-major profile usable across the guitar range.
+- After input selection, a profile choice accepts Enter/1 for default C major or
+  2 for a custom scale and wake. Other/unknown inputs require headphone consent
+  before this choice; monitoring remains off.
+- Custom capture is available only in explicit `--live`: the selected input is
+  opened with monitoring off to capture eight scale notes and a 3–6-note wake,
+  then a keyboard review accepts or repeats the wake. Offline preview reports that
+  custom capture requires `--live` and never opens an audio stream.
+- The default C-major profile remains octave-independent and requires no guitar
+  setup beyond the normal command wake phrase.
 - Immutable snapshots contain slot states/durations/queues/cycles, profile and
   wake registers, pitch/event history, parser/voice/timeout state and the policy's
   own navigation menu. A compact layout retains the menu/footer on 24-row
@@ -329,15 +333,17 @@ and application exit use a short gain ramp rather than an instantaneous cut.
 
 ## Startup flow
 
-Only input selection requires a keyboard. Octave-independent degree matching
-makes one default C-major profile usable across the supported guitar range.
+Input selection is mandatory; the optional profile choice defaults to C major.
+Custom scale capture is available only in `--live`, with monitoring disabled.
 
 ```text
 1. Select input device using the keyboard.
-2. Attach the default C-major control profile.
-3. Generate and validate the finite prompt cache (audio is still closed).
-4. Re-resolve the selected device UID and open the audio engine.
-5. Show the dashboard and wait for the wake phrase.
+2. Accept C major with Enter, or choose custom scale/wake capture.
+3. For custom capture, prepare the finite prompt cache before opening input;
+   capture eight scale notes, then a wake phrase and review it.
+4. Otherwise, prepare and validate the finite prompt cache with audio closed.
+5. Re-resolve the selected device UID and open the looper engine.
+6. Show the dashboard and wait for the wake phrase.
 ```
 
 Example:
@@ -348,12 +354,14 @@ Input device:
 2. Mac microphone
 > 1
 
-Default control: C major; wake degrees = 1 2 1 2
+Control setup:
+1. C major; wake = C5 D5 C5 D5 [default]
+2. Capture custom scale and wake with the guitar
+> [Enter] selects C major
 ```
 
-Selecting the input completes configuration. Input device names must be
-resolved from the currently available CoreAudio devices; volatile `adcN` numbers
-must not be treated as permanent identities.
+Input device names must be resolved from the currently available CoreAudio
+devices; volatile `adcN` numbers must not be treated as permanent identities.
 
 Output uses the configured/default output device and is displayed in the
 terminal. An explicit output selector may be added without changing the command
@@ -384,11 +392,11 @@ from action selection, so both are matched by scale-degree pitch class in any
 supported octave. `C3 -> C3`, `C4 -> C5`, and mixed-octave wake phrases are
 therefore unambiguous in their respective parser phases.
 
-### Retained customization model
+### Custom scale capture
 
-The current startup intentionally skips this model and selects C major after the
-input. The pure setup reducer still validates an ascending seven-note scale plus
-the upper tonic for possible future exposure:
+Startup offers the default C-major profile or custom capture. In `--live`, the
+selected input is opened with monitoring disabled while the player captures an
+ascending seven-note scale plus the upper tonic:
 
 ```text
 1 2 3 4 5 6 7 1'
@@ -962,7 +970,10 @@ Using generated temporary audio buffers:
 Only when the user requests and is ready to play:
 
 - FX100 and microphone selection.
-- Default C-major setup begins immediately after input selection.
+- Default C major is selected by pressing Enter at the post-input profile prompt;
+  custom scale/wake capture is exercised only in `--live`.
+- Custom capture receives eight ascending notes, then a 3–6-note wake and one
+  second of silence; review/retake, `c`, and `q` all close the setup engine cleanly.
 - Wake recognition under clean and effected guitar tones.
 - Same-note staccato behavior.
 - Voice prompt timing and command guards.
