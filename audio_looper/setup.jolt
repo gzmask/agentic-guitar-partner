@@ -5,13 +5,16 @@
     [clojure.string :as str]))
 
 
+(def default-scale [60 62 64 65 67 69 71 72])
+
+
 (defn initial-state
   [inventory]
   (let [output (first (filter :default? (:outputs inventory)))]
     {:stage (if (and (seq (:inputs inventory)) output) :input :error)
      :inventory inventory :input nil :output output :profile nil
      :monitor? false :headphones? false :sample 0 :last-note-id 0 :held nil
-     :scale [] :wake [] :silence nil
+     :scale [] :scale-name nil :wake [] :silence nil
      :message (when (or (empty? (:inputs inventory)) (nil? output))
                 "Input or default output unavailable; no device will be opened.")}))
 
@@ -68,7 +71,7 @@
       (and (= :line type) (= "q" text)) (assoc state :stage :quit)
       (and (= :line type) (= "c" text))
       (if (and (:input state) (or (not (:headphones-required? state)) (:headphones? state)))
-        (assoc state :stage :profile :scale [] :wake [] :held nil)
+        (assoc state :stage :profile :scale [] :scale-name nil :wake [] :held nil)
         (assoc state :message "Select an input and confirm headphones before configuring."))
       (and (= :line type) (= :input stage))
       (if-let [index (when (re-matches #"[0-9]+" text) (parse-long text))]
@@ -88,11 +91,13 @@
       (and (= :line type) (= :profile stage))
       (case text
         ("" "1") (assoc state :profile control/default-profile :stage :ready :message nil)
-        "2" (assoc state :stage :scale :scale [] :wake [] :held nil :message nil)
-        (assoc state :message "Enter or 1 selects C major; 2 captures a custom scale and wake."))
+        "2" (assoc state :stage :scale :scale [] :scale-name nil :wake [] :held nil :message nil)
+        "3" (assoc state :stage :wake :scale default-scale :scale-name "C major"
+                    :wake [] :held nil :silence nil :message nil)
+        (assoc state :message "Enter/1 uses the default; 2 captures a custom scale and wake; 3 captures a C-major wake."))
       (and (= :capture-unavailable type) (#{:scale :wake} stage))
-      (assoc state :stage :profile :scale [] :wake [] :held nil
-             :message "Custom scale capture requires --live; choose C major or quit.")
+      (assoc state :stage :profile :scale [] :scale-name nil :wake [] :held nil
+             :message "Custom guitar capture requires --live; choose default C major or quit.")
       (and (= :line type) (= :review stage))
       (case text
         "" (assoc state :stage :ready :message nil)
@@ -112,7 +117,10 @@
            (nil? (:held state)) (>= (- (:sample state) (:silence state)) 44100)
            (seq (:wake state)))
       (try
-        (assoc state :stage :review :profile (control/profile (:scale state) (:wake state)) :message nil)
+        (assoc state :stage :review
+               :profile (cond-> (control/profile (:scale state) (:wake state))
+                          (:scale-name state) (assoc :name (:scale-name state)))
+               :message nil)
         (catch Exception _
           (assoc state :wake [] :silence nil :message "Wake must be 3..6 scale notes; play it again.")))
       :else state)))
@@ -140,8 +148,10 @@
                           "Use headphones to prevent acoustic feedback. Headphones connected? [y/N]"]
              :profile ["Control setup:" "1. C major; wake = C5 D5 C5 D5 [default]"
                        (if live-capture? "2. Capture custom scale and wake with the guitar"
-                           "2. Custom scale capture requires --live")
-                       "> [Enter] selects C major"]
+                           "2. Custom scale/wake capture requires --live")
+                       (if live-capture? "3. C major; capture a custom wake with the guitar"
+                           "3. Custom C-major wake capture requires --live")
+                       "> [Enter] or 1 selects C major"]
              :scale [(str "Play ascending scale + octave (8 notes): " (:scale state))
                      capture-help]
              :wake [(str "Play a 3..6-note wake, then one second of silence: " (:wake state))

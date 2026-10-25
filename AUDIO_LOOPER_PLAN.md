@@ -43,8 +43,9 @@ the pure reference. Every recorded stereo sample is compared with its source.
 Only `--live` can open devices. It requires a foreground TTY and fresh UID-based
 device resolution. Input selection is the sole mandatory keyboard setup; a
 post-input profile choice defaults to C major on Enter and offers custom scale/wake
-capture in explicit `--live` mode. A warning is printed, but the explicit `--live`
-invocation replaces the former redundant typed `LIVE` confirmation.
+or C-major custom-wake capture in explicit `--live` mode. A warning is printed,
+but the explicit `--live` invocation replaces the former redundant typed `LIVE`
+confirmation.
 
 ### Stage 1: pure control model
 
@@ -100,13 +101,13 @@ invocation replaces the former redundant typed `LIVE` confirmation.
   FFI adapter, with no input/output stream. Device ordering matches the pinned
   Csound 6.18 rtauhal module's separate input/output numbering. Every UTF-8/array
   access is checked against the returned property size; CF strings are released.
-- After input selection, a profile choice accepts Enter/1 for default C major or
-  2 for a custom scale and wake. Other/unknown inputs require headphone consent
-  before this choice; monitoring remains off.
-- Custom capture is available only in explicit `--live`: the selected input is
-  opened with monitoring off to capture eight scale notes and a 3–6-note wake,
-  then a keyboard review accepts or repeats the wake. Offline preview reports that
-  custom capture requires `--live` and never opens an audio stream.
+- After input selection, a profile choice accepts Enter/1 for default C major
+  and default wake, 2 for a custom scale and wake, or 3 for a custom wake on
+  C major. Other/unknown inputs require headphone consent first; monitoring stays off.
+- Custom wake/scale capture is available only in explicit `--live`: the selected
+  input is opened with monitoring off. Option 2 captures eight scale notes before
+  the wake; option 3 captures only a wake on C major. A keyboard review accepts or
+  repeats the wake. Offline preview never opens an audio stream.
 - The default C-major profile remains octave-independent and requires no guitar
   setup beyond the normal command wake phrase.
 - Immutable snapshots contain slot states/durations/queues/cycles, profile and
@@ -334,13 +335,14 @@ and application exit use a short gain ramp rather than an instantaneous cut.
 ## Startup flow
 
 Input selection is mandatory; the optional profile choice defaults to C major.
-Custom scale capture is available only in `--live`, with monitoring disabled.
+Custom wake/scale capture is available only in `--live`, with monitoring disabled.
 
 ```text
 1. Select input device using the keyboard.
-2. Accept C major with Enter, or choose custom scale/wake capture.
+2. Accept C major/default wake with Enter, choose option 2 for custom scale/wake,
+   or option 3 for a custom wake on C major.
 3. For custom capture, prepare the finite prompt cache before opening input;
-   capture eight scale notes, then a wake phrase and review it.
+   option 2 captures eight scale notes first, then capture and review the wake.
 4. Otherwise, prepare and validate the finite prompt cache with audio closed.
 5. Re-resolve the selected device UID and open the looper engine.
 6. Show the dashboard and wait for the wake phrase.
@@ -357,7 +359,8 @@ Input device:
 Control setup:
 1. C major; wake = C5 D5 C5 D5 [default]
 2. Capture custom scale and wake with the guitar
-> [Enter] selects C major
+3. Keep C major; capture a custom wake
+> [Enter] selects C major/default wake
 ```
 
 Input device names must be resolved from the currently available CoreAudio
@@ -392,18 +395,22 @@ from action selection, so both are matched by scale-degree pitch class in any
 supported octave. `C3 -> C3`, `C4 -> C5`, and mixed-octave wake phrases are
 therefore unambiguous in their respective parser phases.
 
-### Custom scale capture
+### Custom profile capture
 
-Startup offers the default C-major profile or custom capture. In `--live`, the
-selected input is opened with monitoring disabled while the player captures an
-ascending seven-note scale plus the upper tonic:
+Startup offers C major with its default wake, custom scale plus wake, or a custom
+wake on C major. Options 2 and 3 are available only in `--live`; the selected
+input is opened with monitoring disabled. Option 2 first captures an ascending
+seven-note scale plus the upper tonic:
 
 ```text
 1 2 3 4 5 6 7 1'
 ```
 
-The first note is explicitly the tonic. The eighth note validates the octave and
-completeness of the scale. The first seven captured pitches and, when they remain
+After the eight-note scale capture for option 2, or immediately for option 3,
+the player captures a 3–6-note wake and reviews it. Option 3 retains the standard
+C-major scale and changes only the wake. The first note in option 2 is explicitly
+the tonic; the eighth note validates the octave and completeness of the scale.
+The first seven captured pitches and, when they remain
 inside 70–1400 Hz, pitches one octave above are retained as display/playability
 references. High profiles fall back to their captured octave. Command execution
 matches their seven unique pitch classes, so the player may move any token to a
@@ -970,10 +977,10 @@ Using generated temporary audio buffers:
 Only when the user requests and is ready to play:
 
 - FX100 and microphone selection.
-- Default C major is selected by pressing Enter at the post-input profile prompt;
-  custom scale/wake capture is exercised only in `--live`.
-- Custom capture receives eight ascending notes, then a 3–6-note wake and one
-  second of silence; review/retake, `c`, and `q` all close the setup engine cleanly.
+- Enter selects default C major/wake; options 2/3 capture custom scale/wake or
+  custom wake on C major, respectively, only in `--live`.
+- Custom capture receives eight ascending notes when needed, then a 3–6-note wake
+  and one second of silence; review/retake, `c`, and `q` close setup cleanly.
 - Wake recognition under clean and effected guitar tones.
 - Same-note staccato behavior.
 - Voice prompt timing and command guards.

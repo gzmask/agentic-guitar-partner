@@ -38,6 +38,12 @@
         fresh (assoc-in inventory [:inputs 0 :id] "adc9")]
     (verify! "input selection offers a scale choice before startup"
              (= :profile (:stage profile-prompt)))
+    (verify! "live profile prompt offers wake-only recapture on C major"
+             (some #(str/includes? % "3. C major; capture a custom wake")
+                   (setup/prompt profile-prompt true)))
+    (verify! "preview marks custom wake capture as requiring live mode"
+             (some #(str/includes? % "3. Custom C-major wake capture requires --live")
+                   (setup/prompt profile-prompt false)))
     (verify! "Enter accepts the default C-major profile"
              (and (= :ready (:stage ready)) (= control/default-profile (:profile ready))))
     (verify! "line input selected by current list" (= "fx" (get-in ready [:input :uid])))
@@ -64,6 +70,17 @@
                    (setup/step {:type :line :text "1"})
                    (setup/step {:type :line :text "2"}))
         custom-preview (setup/step custom {:type :capture-unavailable})
+        custom-wake (-> (setup/initial-state inventory)
+                        (setup/step {:type :line :text "1"})
+                        (setup/step {:type :line :text "3"}))
+        wake-only (reduce (fn [state [id midi]]
+                            (-> state
+                                (setup/step {:type :note-on :id id :midi midi :sample (* id 10000)})
+                                (setup/step {:type :note-off :id id :reason :silence
+                                             :end-sample (+ (* id 10000) 1000)
+                                             :sample (+ (* id 10000) 6292)})))
+                          custom-wake [[1 60] [2 67] [3 60]])
+        wake-review (setup/step wake-only {:type :tick :sample 155101})
         scale (reduce (fn [state [id midi]]
                         (-> state
                             (setup/step {:type :note-on :id id :midi midi :sample (* id 10000)})
@@ -83,6 +100,13 @@
       (verify! "native double pitches normalize in setup" (= [62] (:scale floating)))
       (verify! "lost event resets the captured wake" (and (= :wake (:stage reset)) (empty? (:wake reset)))))
     (verify! "custom profile choice starts scale capture" (= :scale (:stage custom)))
+    (verify! "custom wake choice retains the C-major scale"
+             (and (= :wake (:stage custom-wake))
+                  (= setup/default-scale (:scale custom-wake))))
+    (verify! "C-major custom wake review retains scale name and degree mapping"
+             (and (= :review (:stage wake-review))
+                  (= "C major" (get-in wake-review [:profile :name]))
+                  (= [1 5 1] (get-in wake-review [:profile :wake :degrees]))))
     (verify! "offline custom capture returns to profile choice safely"
              (and (= :profile (:stage custom-preview))
                   (str/includes? (:message custom-preview) "--live")))

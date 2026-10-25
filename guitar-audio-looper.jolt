@@ -289,7 +289,7 @@ endin")
       ["--devices"] (do (engine/arm-wall-clock! 600) (terminal/list-devices!))
       ["--live"] (terminal/live! no-tui?)
       ([] ["--preview"]) (terminal/preview! no-tui?)
-      ["--help"] (println "Default/--preview: keyboard input selection and OFFLINE dashboard; NO audio stream.\n--live: foreground live PCM looper; select input, then press Enter for default C major or choose custom scale/wake capture.\n--no-tui: plain output; redirected preview prints once.\n--devices: current CoreAudio names, stable UIDs and volatile identifiers.\n--check-control / --check-ui / --check-runtime / --check-engine: offline checks.\n--check: all offline checks including embedded API/PCM/TTS. Only --live opens audio devices.")
+      ["--help"] (println "Default/--preview: keyboard input selection and OFFLINE dashboard; NO audio stream.\n--live: foreground live PCM looper; select input, then press Enter/1 for default C major, 2 for custom scale/wake, or 3 for custom wake on C major.\n--no-tui: plain output; redirected preview prints once.\n--devices: current CoreAudio names, stable UIDs and volatile identifiers.\n--check-control / --check-ui / --check-runtime / --check-engine: offline checks.\n--check: all offline checks including embedded API/PCM/TTS. Only --live opens audio devices.")
       (throw (ex-info "Unknown options; use --help."
                       {:type :usage}))))
   (catch Exception e
