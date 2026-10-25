@@ -18,7 +18,8 @@ It provides:
 - octave-independent guitar commands based on C-major scale degrees;
 - sample-accurate recording and playback boundaries;
 - outer-silence trimming for the first/master loop;
-- synchronized later loops and queued cycle-boundary playback;
+- synchronized later loops with a selectable 1–6 master-cycle length and automatic finalization;
+- queued cycle-boundary playback;
 - spoken prompts mixed by Csound, not played directly by `say`;
 - a fixed ANSI dashboard and a line-oriented `--no-tui` mode;
 - foreground ownership, Ctrl+C cleanup, and a 600-second OS safety alarm.
@@ -42,9 +43,13 @@ jolt guitar-audio-looper.jolt --live
 ```
 
 `--live` is the only mode that opens audio devices. It requires a foreground
-terminal. Select the input with the keyboard; the default C-major control profile
-is then applied automatically. The finite speech cache is generated before the
-audio stream opens, so startup can pause for tens of seconds.
+terminal. Select the input with the keyboard, then choose a control profile:
+press Enter/1 for C major with the default wake, 2 to capture a custom scale and
+wake, or 3 to keep C major and capture a custom wake. In `--live`, play C/D/E
+from the default scale to select options 1/2/3; release the note and wait for
+silence. Keyboard selection remains available. Setup capture opens the selected
+input with monitoring off. The finite speech cache is generated before any audio
+stream opens, so startup can pause for tens of seconds.
 
 Use `--live --no-tui` only when line-oriented logs are desired. That option
 intentionally disables the fixed dashboard.
@@ -65,7 +70,7 @@ After the wake phrase, select a loop or exit:
 | Degree | Note | Action |
 | ---: | --- | --- |
 | 1–6 | C, D, E, F, G, A | Select loop 1–6 |
-| 7 | B | Begin confirmed exit |
+| 7 | B | Exit immediately |
 
 After selecting a loop, choose an action:
 
@@ -78,9 +83,18 @@ After selecting a loop, choose an action:
 | 5 | G | Erase the selected stopped loop |
 | 6–7 | A, B | Reserved |
 
+For the first/master clip, record as before and stop it with degree 2. Once a
+master exists, degree 1 asks for the later clip's length: play scale degree 1–6
+(C, D, E, F, G, A in any octave) to record that many full master cycles. The
+recorder starts on the next shared boundary and automatically finalizes at the
+selected boundary. Degree 2 remains available as an early stop; it keeps only
+already-completed master cycles. Choices that exceed the 120-second slot
+capacity are disabled.
+
 Erase is a direct command and is published only after the native engine
-acknowledges it. Guitar-driven exit retains a held confirmation; keyboard `q`
-performs a safe fade and exit. `[d]` toggles pitch debug and `[c]` reopens input
+acknowledges it. The wake phrase followed by degree 7 starts the safe exit fade
+immediately; there is no second-note confirmation or hold. Keyboard `q` uses the
+same graceful shutdown. `[d]` toggles pitch debug and `[c]` reopens input
 selection when all slots are empty and idle.
 
 The first finalized clip establishes the master cycle. Its leading/trailing

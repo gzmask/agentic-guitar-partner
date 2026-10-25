@@ -27,14 +27,49 @@
 
 (defn- check-setup!
   []
-  (let [ready (configured)
+  (let [profile-prompt (setup/step (setup/initial-state inventory)
+                                   {:type :line :text "1"})
+        guitar-choice (fn [midi]
+                        (-> profile-prompt
+                            (setup/step {:type :note-on :id 1 :midi midi :sample 10000
+                                         :onset-sample 9000})
+                            (setup/step {:type :note-off :id 1 :reason :silence
+                                         :end-sample 11000 :sample 16292})
+                            (setup/step {:type :tick :sample 55100})))
+        guitar-pending (setup/step profile-prompt
+                                   {:type :note-on :id 1 :midi 60 :sample 10000})
+        guitar-default (guitar-choice 60)
+        guitar-scale (guitar-choice 62)
+        guitar-wake (guitar-choice 64)
+        ready (configured)
         microphone (-> (setup/initial-state inventory)
                        (setup/step {:type :line :text "2"}))
         cancelled (setup/step microphone {:type :line :text ""})
         mic-ready (-> microphone (setup/step {:type :line :text "y"})
                       (setup/step {:type :line :text ""}))
         fresh (assoc-in inventory [:inputs 0 :id] "adc9")]
-    (verify! "line input proceeds directly with the default profile"
+    (verify! "input selection offers a scale choice before startup"
+             (= :profile (:stage profile-prompt)))
+    (verify! "live profile prompt offers wake-only recapture on C major"
+             (some #(str/includes? % "3. C major; capture a custom wake")
+                   (setup/prompt profile-prompt true)))
+    (verify! "live profile prompt maps default-scale C/D/E to options 1/2/3"
+             (some #(str/includes? % "play C/D/E in the default scale")
+                   (setup/prompt profile-prompt true)))
+    (verify! "guitar menu choice waits for note release and silence"
+             (= :profile-release (:stage guitar-pending)))
+    (verify! "default-scale C selects the default profile"
+             (and (= :ready (:stage guitar-default))
+                  (= control/default-profile (:profile guitar-default))))
+    (verify! "default-scale D selects custom scale capture"
+             (= :scale (:stage guitar-scale)))
+    (verify! "default-scale E selects custom wake on C major"
+             (and (= :wake (:stage guitar-wake))
+                  (= setup/default-scale (:scale guitar-wake))))
+    (verify! "preview marks custom wake capture as requiring live mode"
+             (some #(str/includes? % "3. Custom C-major wake capture requires --live")
+                   (setup/prompt profile-prompt false)))
+    (verify! "Enter accepts the default C-major profile"
              (and (= :ready (:stage ready)) (= control/default-profile (:profile ready))))
     (verify! "line input selected by current list" (= "fx" (get-in ready [:input :uid])))
     (verify! "microphone requires headphones" (= :headphones (:stage microphone)))
@@ -45,7 +80,9 @@
              (try (setup/resolve-session (assoc microphone :stage :ready :profile control/default-profile) inventory)
                   false (catch Exception e (= :headphones-required (:type (ex-data e))))))
     (verify! "empty headphone answer is not consent" (= :headphones (:stage cancelled)))
-    (verify! "microphone can finish with explicit confirmation"
+    (verify! "microphone requires headphone consent before scale selection"
+             (= :profile (:stage (setup/step microphone {:type :line :text "y"}))))
+    (verify! "microphone can finish with explicit headphone consent and default scale"
              (and (= :ready (:stage mic-ready)) (:headphones? mic-ready) (not (:monitor? mic-ready))))
     (verify! "volatile device number resolved again by UID"
              (= "adc9" (get-in (setup/resolve-session ready fresh) [:input :id])))
@@ -56,8 +93,19 @@
                   (catch Exception e (= :device-unavailable (:type (ex-data e)))))))
   (let [custom (-> (setup/initial-state inventory)
                    (setup/step {:type :line :text "1"})
-                   (assoc :stage :profile)
                    (setup/step {:type :line :text "2"}))
+        custom-preview (setup/step custom {:type :capture-unavailable})
+        custom-wake (-> (setup/initial-state inventory)
+                        (setup/step {:type :line :text "1"})
+                        (setup/step {:type :line :text "3"}))
+        wake-only (reduce (fn [state [id midi]]
+                            (-> state
+                                (setup/step {:type :note-on :id id :midi midi :sample (* id 10000)})
+                                (setup/step {:type :note-off :id id :reason :silence
+                                             :end-sample (+ (* id 10000) 1000)
+                                             :sample (+ (* id 10000) 6292)})))
+                          custom-wake [[1 60] [2 67] [3 60]])
+        wake-review (setup/step wake-only {:type :tick :sample 155101})
         scale (reduce (fn [state [id midi]]
                         (-> state
                             (setup/step {:type :note-on :id id :midi midi :sample (* id 10000)})
@@ -76,6 +124,17 @@
           reset (setup/step scale {:type :gap})]
       (verify! "native double pitches normalize in setup" (= [62] (:scale floating)))
       (verify! "lost event resets the captured wake" (and (= :wake (:stage reset)) (empty? (:wake reset)))))
+    (verify! "custom profile choice starts scale capture" (= :scale (:stage custom)))
+    (verify! "custom wake choice retains the C-major scale"
+             (and (= :wake (:stage custom-wake))
+                  (= setup/default-scale (:scale custom-wake))))
+    (verify! "C-major custom wake review retains scale name and degree mapping"
+             (and (= :review (:stage wake-review))
+                  (= "C major" (get-in wake-review [:profile :name]))
+                  (= [1 5 1] (get-in wake-review [:profile :wake :degrees]))))
+    (verify! "offline custom capture returns to profile choice safely"
+             (and (= :profile (:stage custom-preview))
+                  (str/includes? (:message custom-preview) "--live")))
     (verify! "ascending scale transitions to wake capture" (= :wake (:stage scale)))
     (verify! "wake not accepted before silence" (= :wake (:stage wake)))
     (verify! "one second silence leads to review" (= :review (:stage reviewing)))

@@ -41,9 +41,14 @@
                 (:cycle slot))
         pending (:pending slot)]
     {:id (:id slot) :state label :length (:length-samples slot) :duration duration :cycle cycle
+     :cycles (:record-cycles slot) :target-length-samples (:target-length-samples slot)
      :pending pending
      :text (str (:id slot) "  " (str/upper-case (name label))
                 (when (pos? duration) (str "  " (seconds duration)))
+                (when (pos? (or (:target-length-samples slot) 0))
+                  (str "  target=" (:record-cycles slot) "T"))
+                (when (and (= :ready (:clip-state slot)) (:record-cycles slot))
+                  (str "  length=" (:record-cycles slot) "T"))
                 (when (= :playing play) (str "  cycle=" cycle))
                 (when (:at-sample pending) (str "  queued@" (seconds (:at-sample pending)))))}))
 
@@ -74,7 +79,7 @@
      :output (str (:name (:output context)) " [" (:id (:output context)) "]")
      :phase (str/upper-case (name phase))
      :voice (if voice (str (name (:state voice)) ": " (name (:prompt voice))) "idle")
-     :paused? (or voice (not (#{:dormant :wait-loop :wait-operation :confirm :confirm-held :wait-release} phase)))
+     :paused? (or voice (not (#{:dormant :wait-loop :wait-operation :wait-record-length} phase)))
      :scale (or (:name configuration) "custom seven-degree scale") :degrees degrees :wake wake
      :timeout (when deadline (format "%.1fs" (/ (double (max 0 (- deadline (:sample state)))) 44100.0)))
      :slots (mapv #(slot-view state %) (:slots state))
@@ -91,9 +96,7 @@
      :options (control/navigation state)
      :instruction (case phase :dormant (str "Wake by degree in any octave: " wake)
                         :arm-release "Release the command note to begin recording."
-                        :wait-release "Release the first confirmation note."
-                        :confirm (str (note-name (get-in state [:parser :confirm-midi])) " hold >=800ms, then release.")
-                        :confirm-held "Hold >=800ms, then release into silence."
+                        :wait-record-length "Choose 1–6 master cycles using scale degrees 1–6."
                         :await-engine "Waiting for engine acknowledgement."
                         "Listening paused during prompt/guard/transition.")
      :configure? (setup/reconfigurable? state)
@@ -157,7 +160,8 @@
 (defn- line-key
   [snapshot]
   (cond-> (select-keys snapshot [:input :output :phase :voice :scale :degrees :wake :options :debug?])
-    true (assoc :slots (mapv #(select-keys % [:id :state :length :pending]) (:slots snapshot)))
+    true (assoc :slots (mapv #(select-keys % [:id :state :length :cycles :target-length-samples :pending])
+                             (:slots snapshot)))
     (:debug? snapshot) (assoc :pitch (:pitch snapshot) :gate (:gate snapshot)
                               :event (:event snapshot) :events (:events snapshot))))
 
