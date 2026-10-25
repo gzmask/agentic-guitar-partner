@@ -79,7 +79,7 @@
                            :onset-time (/ b 44100.0) :confirm-time (/ sample 44100.0)})
       :note-off (merge base {:id id :end-sample (long a) :reason (if (== b 1) :silence :pitch-change)})
       :prompt-finished (assoc base :id id)
-      :record-limit (assoc base :loop-id slot)
+      :record-limit (assoc base :loop-id slot :operation-id id :length-samples (long a))
       :mixer-faded (assoc base :operation-id id)
       (merge base {:loop-id slot :operation-id id}
              (case type

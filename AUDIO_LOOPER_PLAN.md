@@ -64,8 +64,8 @@ the default C-major profile immediately. A warning is printed, but the explicit
   are covered. Tokens during speech/guards are consumed, never deferred.
 - Every policy row generates the same menu data used by command validation.
   The global restriction while a recorder is active (including armed/finalizing)
-  takes precedence over local no-op entries: only its record-stop and the exit
-  path remain available. There is no overwrite, overdub, or second recorder.
+  takes precedence over local no-op entries: only its record-stop and the direct
+  degree-7 exit path remain available. There is no overwrite, overdub, or second recorder.
 - Record start waits for both prompt/guard completion **and confirmed command
   silence**. Otherwise a held final control note would leak into PCM. An
   unscheduled arm times out after four seconds waiting for release. A delayed
@@ -76,8 +76,8 @@ the default C-major profile immediately. A warning is printed, but the explicit
   freezes writing exactly at capacity before notifying the host.
 - Erase is a direct phase-disambiguated action like record/play operations and
   still waits for its matching native acknowledgement before publishing empty.
-  Exit alone requires release, a fresh note held for at least 800 ms, and confirmed
-  silence before the mixer fade.
+  The wake phrase followed by degree 7 starts the safe mixer fade immediately;
+  exit has no second-note confirmation, hold, or release requirement.
 - One global engine event sequence rejects duplicates and cancels parsing on a
   gap. If an audio operation is in flight, a gap fails closed with shutdown rather
   than guessing whether it ran. Effect IDs are separately monotonic correlation
@@ -550,7 +550,7 @@ ANNOUNCING_READY
 
 WAIT_LOOP
   -- degree 1..6 --> ANNOUNCING_LOOP
-  -- degree 7 --> WAIT_EXIT_RELEASE
+  -- degree 7 --> BEGIN_EXIT
   -- invalid/timeout --> CANCELLED
 
 ANNOUNCING_LOOP
@@ -592,7 +592,7 @@ Multiple slots may play concurrently. Only one slot may be armed or recording.
 While any slot is recording, the guitar command channel accepts only:
 
 - record stop for that active slot;
-- the confirmed emergency/exit path.
+- the direct degree-7 exit path.
 
 Other loop commands are rejected. This prevents wake and command notes intended
 for one slot from being recorded into another slot's PCM waveform.
@@ -601,14 +601,19 @@ for one slot from being recorded into another slot's PCM waveform.
 
 ### Record start
 
-1. Recognize and validate the complete command.
-2. Announce that recording is armed.
+1. Recognize and validate the complete command. For a non-master clip, ask for
+   a length of 1–6 master cycles before arming; choices that exceed the 120-second
+   slot capacity are disabled.
+2. Announce that recording is armed (and repeat the selected cycle count for a
+   non-master clip).
 3. Wait for the voice prompt and guard interval to finish, and require confirmed
    silence after the command. A held final command note cannot start the recorder;
    cancel an unscheduled arm after four seconds waiting for release.
 4. Start at the selected synchronization boundary, planned from the current
    audio clock (not a past prompt/guard timestamp after a delayed poll).
-5. Emit a short non-pitched cue and announce/display `RECORDING`.
+5. Emit a short non-pitched cue and announce/display `RECORDING`. A non-master
+   take auto-finalizes at its selected full-cycle boundary; degree-2 stop remains
+   an early stop and keeps only completed cycles.
 
 No startup command or voice prompt may enter the recorded buffer.
 
@@ -641,10 +646,13 @@ The hardened default is a shared cycle:
 - The first successfully finalized clip establishes the master cycle length.
 - If no master exists, the first recording starts after its prompt/guard cue and
   ends at the stop wake's onset-derived sample boundary.
-- Later recordings start on the next master-cycle boundary.
-- Later recording lengths are complete integer multiples of the master cycle.
-- Their stop boundary is the latest completed master-cycle boundary at or before
-  the stop wake onset.
+- Later recordings start on the next master-cycle boundary after the player
+  selects 1–6 cycles. The host passes that exact sample count to Csound; Csound
+  freezes PCM at the requested boundary and emits a correlated limit event for
+  host finalization.
+- A non-master take automatically ends after its selected number of complete
+  cycles. A manual degree-2 early stop still uses the latest completed
+  master-cycle boundary at or before the stop wake onset.
 - Playback start and stop are queued to the next master-cycle boundary.
 - The terminal and voice distinguish `queued` from actual `started/stopped`.
 
@@ -677,16 +685,16 @@ only for a ready, stopped clip; it never implicitly stops a playing clip.
 
 ## Exit operation
 
-Exit is also destructive and requires confirmation:
+After the wake phrase, degree 7 immediately begins graceful exit:
 
 ```text
-WAKE -> degree 7 -> release -> prompt -> fresh degree 7 confirmation
+WAKE -> degree 7 -> mixer fade -> owned engine cleanup
 ```
 
-The second degree-7 note must be held for at least 800 ms and released. Any other
-note or timeout cancels exit.
+There is no second note, hold, or release confirmation. The exit note is accepted
+while recording as well as while idle; an incomplete take is never published.
 
-Confirmed exit:
+Exit:
 
 1. Fade the mixer over at least 30 ms.
 2. Stop/finalize or discard any active incomplete recording according to the
@@ -695,8 +703,7 @@ Confirmed exit:
 4. Restore the terminal.
 5. Return an accurate process exit status.
 
-Ctrl+C remains an immediate foreground safety stop and does not require a guitar
-confirmation.
+Ctrl+C remains an immediate foreground safety stop.
 
 ## Voice prompts
 
@@ -726,7 +733,6 @@ Minimum prompts:
 - Erased.
 - Invalid command and state-specific rejection.
 - Command cancelled.
-- Exit confirmation / exiting.
 - Maximum recording length reached.
 - Audio engine failure when it is safe to report one.
 
@@ -907,9 +913,9 @@ Run without audio devices and verify:
 - All state/operation policy combinations.
 - Duplicate commands are idempotent.
 - Prompt and guard states reject premature tokens.
-- Direct erase waits for a matching native acknowledgement; exit retains its
-  fresh held confirmation.
-- Invalid/timeout exit confirmation preserves buffers.
+- Direct erase waits for a matching native acknowledgement; one degree-7 exit
+  note after wake immediately starts graceful shutdown.
+- Exit and timeout paths never publish incomplete buffers.
 - Recording mode rejects commands for other slots.
 - Command suffixes cannot seed a new wake phrase.
 - Dashboard menu exactly matches policy output.
@@ -942,6 +948,8 @@ Using generated temporary audio buffers:
 - Record-stop trimming uses wake onset/sample time, not confirmation time.
 - First/master recording outer silence is trimmed from bounded RMS summaries,
   with documented preroll/tail; synchronized later clips preserve cycle phase.
+- Non-master recording length selection is bounded by capacity and automatically
+  finalizes at exactly the selected number of master cycles.
 - Buffer bounds hold at zero, normal, and maximum durations.
 - Boundary crossfades avoid discontinuities.
 - Six concurrent players mix without clipping under the defined gain policy.
@@ -961,7 +969,7 @@ Only when the user requests and is ready to play:
 - Record/play/stop/erase on all six slots.
 - No command phrase in finalized recordings.
 - No prompt feedback with headphones.
-- Ctrl+C cleanup and confirmed guitar exit.
+- Ctrl+C cleanup and direct degree-7 guitar exit.
 
 ### Acceptance criteria
 
@@ -969,7 +977,7 @@ Only when the user requests and is ready to play:
   approximation.
 - A held pitch never becomes two command tokens.
 - Intentional repeated notes are reliably separable with documented articulation.
-- Exit cannot execute from a single unconfirmed token; erase is intentionally a
+- Degree 7 after wake directly starts graceful exit; erase is intentionally a
   direct action and still requires a selected stopped slot plus native acknowledgement.
 - No recording is silently overwritten.
 - Menus, spoken prompts, and actual accepted commands remain consistent.

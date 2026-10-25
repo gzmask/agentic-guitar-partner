@@ -134,6 +134,8 @@
                                        {:type :record-finalize :sample 5000 :length-samples 4096}]} [[100 4064 32]])
         maximum (filter #(= :record-limit (:type %)) (:events result))]
     (verify! "capacity freezes exactly once without writing one sample past" (= [4243] (mapv :sample maximum)))
+    (verify! "capacity event reports its correlated recorder and exact length"
+             (= [[1 4096]] (mapv (juxt :operation-id :length-samples) maximum)))
     (doseq [i (range 32)]
       (verify! "last allocated samples remain intact" (== (wav/sample original (+ 147 4064 i) 0)
                                                          (get-in result [:tables 0 i]))))
@@ -152,6 +154,33 @@
       (verify! "duplicate native operation is not executed twice"
                (= [:record-started :record-finalized] (mapv :type (:events duplicate)))))
     (println "PASS native capacity/freeze, zero bounds, sequenced failures, duplicate rejection")))
+
+
+(defn- check-fixed-record-length!
+  [owner]
+  (let [input (generate! owner "fixed-length.wav" "0.24*sin(2*PI*220*t)|0.16*sin(2*PI*330*t)" 0.2)
+        original (wav/read! input)
+        target 1024
+        start 147
+        result (perform! {:input input :duration 0.1 :capacity 4096 :detect? false
+                          :operations [{:type :record-start :sample 0 :at-sample start
+                                        :length-samples target}
+                                       {:type :record-finalize :sample 1800
+                                        :length-samples target}]}
+                         [[100 0 target] [101 0 target]])
+        limit (first (filter #(= :record-limit (:type %)) (:events result)))
+        finalized (first (filter #(= :record-finalized (:type %)) (:events result)))]
+    (verify! "fixed recording auto-freezes at the exact requested sample"
+             (and (= (+ start target) (:sample limit))
+                  (= target (:length-samples limit))
+                  (= 1 (:operation-id limit))))
+    (verify! "native finalization publishes exactly the requested length"
+             (and finalized (= target (:length-samples finalized)) (= target (first (:lengths result)))))
+    (doseq [frame (range target) channel (range 2)]
+      (verify! "fixed-length capture preserves every stereo PCM sample"
+               (== (wav/sample original (+ start frame) channel)
+                   (get-in result [:tables channel frame]))))
+    (println "PASS native fixed-cycle recorder auto-finalizes at its exact sample boundary")))
 
 
 (defn- check-voice!
@@ -223,6 +252,7 @@
       (check-silence-trim! owner)
       (check-six! owner)
       (check-capacity! owner)
+      (check-fixed-record-length! owner)
       (check-voice! owner)
       (check-detector! owner)
       (finally (voice/close! owner)))))

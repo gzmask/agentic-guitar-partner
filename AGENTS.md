@@ -38,7 +38,7 @@ or a generic benchmark framework unless explicitly requested. There are no
   selects line-oriented output; omit it when checking the fixed ANSI dashboard.
 - Input selection is the only mandatory keyboard setup for FX100. The default
   C-major guitar command profile is octave-independent.
-- Erase is a direct selected-slot command; guitar exit retains confirmation.
+- Erase is a direct selected-slot command; wake plus degree-7 exit starts the graceful fade immediately, with no extra confirmation or hold.
 - The first/master clip may trim outer silence with documented preroll/tail.
   Later synchronized clips must preserve complete master-cycle phase.
 
