@@ -43,9 +43,10 @@ the pure reference. Every recorded stereo sample is compared with its source.
 Only `--live` can open devices. It requires a foreground TTY and fresh UID-based
 device resolution. Input selection is the sole mandatory keyboard setup; a
 post-input profile choice defaults to C major on Enter and offers custom scale/wake
-or C-major custom-wake capture in explicit `--live` mode. A warning is printed,
-but the explicit `--live` invocation replaces the former redundant typed `LIVE`
-confirmation.
+or C-major custom-wake capture in explicit `--live` mode. In live mode, C/D/E in
+the default scale also select menu options 1/2/3 after release and one second of
+silence. A warning is printed, but explicit `--live` replaces the former typed
+`LIVE` confirmation.
 
 ### Stage 1: pure control model
 
@@ -103,11 +104,14 @@ confirmation.
   access is checked against the returned property size; CF strings are released.
 - After input selection, a profile choice accepts Enter/1 for default C major
   and default wake, 2 for a custom scale and wake, or 3 for a custom wake on
-  C major. Other/unknown inputs require headphone consent first; monitoring stays off.
-- Custom wake/scale capture is available only in explicit `--live`: the selected
-  input is opened with monitoring off. Option 2 captures eight scale notes before
-  the wake; option 3 captures only a wake on C major. A keyboard review accepts or
-  repeats the wake. Offline preview never opens an audio stream.
+  C major. In `--live`, default-scale C/D/E also select options 1/2/3 after the
+  note is released and one second of silence. Other/unknown inputs require
+  headphone consent first; monitoring stays off.
+- In explicit `--live`, the selected input opens with monitoring off before the
+  profile choice and listens for guitar menu notes. The same setup stream supports
+  custom capture: option 2 captures eight scale notes before the wake; option 3
+  captures only a wake on C major. A keyboard review accepts or repeats the wake.
+  Offline preview never opens an audio stream.
 - The default C-major profile remains octave-independent and requires no guitar
   setup beyond the normal command wake phrase.
 - Immutable snapshots contain slot states/durations/queues/cycles, profile and
@@ -335,18 +339,22 @@ and application exit use a short gain ramp rather than an instantaneous cut.
 ## Startup flow
 
 Input selection is mandatory; the optional profile choice defaults to C major.
-Custom wake/scale capture is available only in `--live`, with monitoring disabled.
+In explicit `--live`, prompt preparation precedes a setup input stream with
+monitoring off. Keyboard selection remains available alongside the guitar menu.
 
 ```text
-1. Select input device using the keyboard.
-2. Accept C major/default wake with Enter, choose option 2 for custom scale/wake,
-   or option 3 for a custom wake on C major.
-3. For custom capture, prepare the finite prompt cache before opening input;
-   option 2 captures eight scale notes first, then capture and review the wake.
-4. Otherwise, prepare and validate the finite prompt cache with audio closed.
-5. Re-resolve the selected device UID and open the looper engine.
+1. Select input device using the keyboard; confirm headphones for microphones.
+2. Prepare the finite prompt cache before opening any audio stream.
+3. Open the setup input with monitoring off. Accept C major/default wake with
+   Enter, choose option 2 for custom scale/wake, or option 3 for a custom wake on
+   C major. In `--live`, C/D/E in the default scale select options 1/2/3; release
+   the note and wait for one second of silence.
+4. Option 2 captures eight scale notes first; either custom path then captures
+   and reviews the wake. Close the setup input after the profile is ready.
+5. Re-resolve the selected device UID and open the main looper engine.
 6. Show the dashboard and wait for the wake phrase.
-```
+
+In offline preview, no setup stream is opened and profile selection is keyboard-only.
 
 Example:
 
@@ -360,7 +368,7 @@ Control setup:
 1. C major; wake = C5 D5 C5 D5 [default]
 2. Capture custom scale and wake with the guitar
 3. Keep C major; capture a custom wake
-> [Enter] selects C major/default wake
+> [Enter] selects C major/default wake; live guitar C/D/E selects 1/2/3
 ```
 
 Input device names must be resolved from the currently available CoreAudio
@@ -978,7 +986,8 @@ Only when the user requests and is ready to play:
 
 - FX100 and microphone selection.
 - Enter selects default C major/wake; options 2/3 capture custom scale/wake or
-  custom wake on C major, respectively, only in `--live`.
+  custom wake on C major. Live guitar C/D/E selects options 1/2/3; keyboard
+  selection remains available.
 - Custom capture receives eight ascending notes when needed, then a 3–6-note wake
   and one second of silence; review/retake, `c`, and `q` close setup cleanly.
 - Wake recognition under clean and effected guitar tones.

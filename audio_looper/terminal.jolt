@@ -112,10 +112,10 @@
   nil)
 
 
-(defn- capture-custom!
+(defn- capture-setup!
   [terminal deadline state cache]
   (prepare-cache! cache)
-  (write! "\nOpening the selected input for custom scale capture; monitoring is off.\n")
+  (write! "\nOpening the selected input for profile selection/setup capture; monitoring is off.\n")
   (let [session (refresh-session (select-keys state [:input :output]))
         remaining (max 1.0 (min 600.0 (/ (- deadline (System/nanoTime)) 1e9)))
         running (engine/open! {:live? true :input-device (get-in session [:input :id])
@@ -127,18 +127,25 @@
       (loop [state state rendered nil]
         (when (>= (System/nanoTime) deadline)
           (throw (ex-info "UI session reached its safety time limit." {:type :session-limit})))
-        (let [display (select-keys state [:stage :scale :wake :message :profile])]
-          (when-not (= display rendered)
-            (when (:ansi? @terminal) (write! "\u001b[H\u001b[2J"))
-            (write! (str (str/join "\n" (map dashboard/safe-text (setup/prompt state true))) "\n")))
-          (if-not (#{:scale :wake} (:stage state))
-            state
+        (if-not (#{:profile :profile-release :scale :wake} (:stage state))
+          state
+          (let [display (select-keys state [:stage :scale :wake :message :profile-choice])]
+            (when-not (= display rendered)
+              (when (:ansi? @terminal) (write! "\u001b[H\u001b[2J"))
+              (write! (str (str/join "\n" (map dashboard/safe-text (setup/prompt state true))) "\n")))
             (let [key (native/read-key! 10)
+                  keyboard-choice? (and (= :profile (:stage state))
+                                         (#{\1 \2 \3 \newline \return} key))
+                  _ (when (and keyboard-choice? (:interactive? @terminal))
+                      (write! (if (#{\newline \return} key) "\n" (str key "\n"))))
                   next-state
                   (cond
                     (or (= :eof key) (= \u0004 key) (= \q key))
                     (setup/step state {:type :line :text "q"})
                     (= \c key) (setup/step state {:type :line :text "c"})
+                    keyboard-choice?
+                    (setup/step state {:type :line
+                                       :text (if (#{\newline \return} key) "" (str key))})
                     :else
                     (let [snapshot (engine/poll! running)]
                       (when (:ended? snapshot)
@@ -163,9 +170,15 @@
       :ready (setup/resolve-session state (native/audio-devices!))
       :quit nil
       :error (throw (ex-info (:message state) {:type :device-unavailable}))
-      (:scale :wake) (recur (if live-capture?
-                              (capture-custom! terminal deadline state cache)
-                              (setup/step state {:type :capture-unavailable})))
+      :profile (if live-capture?
+                 (recur (capture-setup! terminal deadline state cache))
+                 (let [line (line! terminal deadline)]
+                   (when-not (= :eof line)
+                     (recur (setup/step state {:type :line :text line})))))
+      (:profile-release :scale :wake)
+      (recur (if live-capture?
+               (capture-setup! terminal deadline state cache)
+               (setup/step state {:type :capture-unavailable})))
       (let [line (line! terminal deadline)]
         (when-not (= :eof line)
           (recur (setup/step state {:type :line :text line})))))))
@@ -194,9 +207,10 @@
 
 (defn- warn-live!
   [session]
-  (write! (str "\nLIVE AUDIO WILL OPEN AFTER PROMPT PREPARATION\nInput: "
+  (write! (str "\nSTARTING LIVE PCM LOOPER\nInput: "
                (dashboard/safe-text (get-in session [:input :name]))
                "\nOutput: " (dashboard/safe-text (get-in session [:output :name]))
+               "\nSetup used the input with monitoring off; the looper engine opens now."
                "\nUse low volume/headphones; avoid direct-monitor doubling and feedback.\n")))
 
 

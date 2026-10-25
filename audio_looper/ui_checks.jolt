@@ -29,6 +29,18 @@
   []
   (let [profile-prompt (setup/step (setup/initial-state inventory)
                                    {:type :line :text "1"})
+        guitar-choice (fn [midi]
+                        (-> profile-prompt
+                            (setup/step {:type :note-on :id 1 :midi midi :sample 10000
+                                         :onset-sample 9000})
+                            (setup/step {:type :note-off :id 1 :reason :silence
+                                         :end-sample 11000 :sample 16292})
+                            (setup/step {:type :tick :sample 55100})))
+        guitar-pending (setup/step profile-prompt
+                                   {:type :note-on :id 1 :midi 60 :sample 10000})
+        guitar-default (guitar-choice 60)
+        guitar-scale (guitar-choice 62)
+        guitar-wake (guitar-choice 64)
         ready (configured)
         microphone (-> (setup/initial-state inventory)
                        (setup/step {:type :line :text "2"}))
@@ -41,6 +53,19 @@
     (verify! "live profile prompt offers wake-only recapture on C major"
              (some #(str/includes? % "3. C major; capture a custom wake")
                    (setup/prompt profile-prompt true)))
+    (verify! "live profile prompt maps default-scale C/D/E to options 1/2/3"
+             (some #(str/includes? % "play C/D/E in the default scale")
+                   (setup/prompt profile-prompt true)))
+    (verify! "guitar menu choice waits for note release and silence"
+             (= :profile-release (:stage guitar-pending)))
+    (verify! "default-scale C selects the default profile"
+             (and (= :ready (:stage guitar-default))
+                  (= control/default-profile (:profile guitar-default))))
+    (verify! "default-scale D selects custom scale capture"
+             (= :scale (:stage guitar-scale)))
+    (verify! "default-scale E selects custom wake on C major"
+             (and (= :wake (:stage guitar-wake))
+                  (= setup/default-scale (:scale guitar-wake))))
     (verify! "preview marks custom wake capture as requiring live mode"
              (some #(str/includes? % "3. Custom C-major wake capture requires --live")
                    (setup/prompt profile-prompt false)))

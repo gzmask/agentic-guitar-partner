@@ -45,10 +45,11 @@ jolt guitar-audio-looper.jolt --live
 `--live` is the only mode that opens audio devices. It requires a foreground
 terminal. Select the input with the keyboard, then choose a control profile:
 press Enter/1 for C major with the default wake, 2 to capture a custom scale and
-wake, or 3 to keep C major and capture a custom wake. Guitar capture opens the
-selected input with monitoring off and is only available in `--live`. The finite
-speech cache is generated before any audio stream opens, so startup can pause for
-tens of seconds.
+wake, or 3 to keep C major and capture a custom wake. In `--live`, play C/D/E
+from the default scale to select options 1/2/3; release the note and wait for
+silence. Keyboard selection remains available. Setup capture opens the selected
+input with monitoring off. The finite speech cache is generated before any audio
+stream opens, so startup can pause for tens of seconds.
 
 Use `--live --no-tui` only when line-oriented logs are desired. That option
 intentionally disables the fixed dashboard.
