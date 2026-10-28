@@ -19,7 +19,8 @@ It provides:
 - sample-accurate recording and playback boundaries;
 - context-sensitive low-E string scrape to stop recording or playback, or exit;
 - outer-silence trimming for the first/master loop;
-- synchronized later loops and queued cycle-boundary playback;
+- synchronized later loops with a selectable 1–6 master-cycle length and automatic finalization;
+- queued cycle-boundary playback;
 - spoken prompts mixed by Csound, not played directly by `say`;
 - a fixed ANSI dashboard and a line-oriented `--no-tui` mode;
 - foreground ownership, Ctrl+C cleanup, and a 600-second OS safety alarm.
@@ -43,9 +44,13 @@ jolt guitar-audio-looper.jolt --live
 ```
 
 `--live` is the only mode that opens audio devices. It requires a foreground
-terminal. Select the input with the keyboard; the default C-major control profile
-is then applied automatically. The finite speech cache is generated before the
-audio stream opens, so startup can pause for tens of seconds.
+terminal. Select the input with the keyboard, then choose a control profile:
+press Enter/1 for C major with the default wake, 2 to capture a custom scale and
+wake, or 3 to keep C major and capture a custom wake. In `--live`, play C/D/E
+from the default scale to select options 1/2/3; release the note and wait for
+silence. Keyboard selection remains available. Setup capture opens the selected
+input with monitoring off. The finite speech cache is generated before any audio
+stream opens, so startup can pause for tens of seconds.
 
 Use `--live --no-tui` only when line-oriented logs are desired. That option
 intentionally disables the fixed dashboard.
@@ -65,7 +70,7 @@ The low-E scrape is the context-sensitive stop/exit gesture:
 
 | Guitar sequence | Action |
 | --- | --- |
-| Wake → degree 1–6 (C–A), then wait | Select an empty slot and start recording |
+| Wake → degree 1–6 (C–A), then wait | Select an empty slot and begin recording setup |
 | While recording → scrape low E | Stop recording directly |
 | Wake → slot → degree 2 (D) | Start that slot's playback |
 | Wake → slot → scrape low E | Stop that slot's playback, or cancel its queued start |
@@ -74,9 +79,9 @@ The low-E scrape is the context-sensitive stop/exit gesture:
 
 `Wake → slot` is a prefix of the playback and erase commands, so after the slot
 selection prompt there is a two-second action window plus 350 ms recognition
-grace. If no action arrives, an **empty, idle** slot starts recording; a slot
-with an existing clip never auto-records or overwrites it. Degree 1 after slot
-selection can also explicitly arm recording. Wait for the recording-armed prompt
+grace. If no action arrives, an **empty, idle** slot begins recording setup; a
+slot with an existing clip never auto-records or overwrites it. Degree 1 after
+slot selection can also explicitly begin recording setup. Wait for the recording-armed prompt
 and start cue before playing the take. Notes played during spoken prompts and
 their guards are ignored; wait for the prompts before selecting a note.
 Contextual scrapes are accepted during those prompts. A scrape also cancels an
@@ -95,10 +100,18 @@ clips the stop is rounded back to the most recent completed master cycle; if no
 cycle is complete, recording continues. Verify results before relying on this
 experimental control.
 
+For the first/master clip, record freely and stop with a scrape. Once a master
+exists, recording setup asks for the later clip's length: play scale degree 1–6
+(C, D, E, F, G, A in any octave) to record that many full master cycles, or
+scrape to cancel. The recorder starts on the next shared boundary and
+finalizes automatically at the selected boundary. A scrape stops it early,
+keeping only completed master cycles. Choices exceeding 120 seconds are disabled.
+
 Erase is a direct command and is published only after the native engine
 acknowledges it. Playback stop occurs at the next master boundary; cancelling a
 queued playback start also waits for native acknowledgement. `Wake → scrape`
-and keyboard `q` use the same safe exit fade, without additional confirmation. `[d]` toggles pitch debug and `[c]` reopens input
+and keyboard `q` use the same safe exit fade, without additional confirmation.
+`[d]` toggles pitch debug and `[c]` reopens input
 selection when all slots are empty and idle.
 
 The first finalized clip establishes the master cycle. Its leading/trailing

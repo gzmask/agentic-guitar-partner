@@ -5,13 +5,18 @@
     [clojure.string :as str]))
 
 
+(def default-scale
+  (conj (:selectors control/default-profile)
+        (+ 12 (first (:selectors control/default-profile)))))
+
+
 (defn initial-state
   [inventory]
   (let [output (first (filter :default? (:outputs inventory)))]
     {:stage (if (and (seq (:inputs inventory)) output) :input :error)
      :inventory inventory :input nil :output output :profile nil
      :monitor? false :headphones? false :sample 0 :last-note-id 0 :held nil
-     :scale [] :wake [] :silence nil
+     :scale [] :scale-name nil :wake [] :silence nil
      :message (when (or (empty? (:inputs inventory)) (nil? output))
                 "Input or default output unavailable; no device will be opened.")}))
 
@@ -52,9 +57,35 @@
           (assoc state field [] :message "Invalid ascending scale/register; play all eight notes again."))))))
 
 
+(defn- select-profile
+  [state choice]
+  (case choice
+    1 (assoc state :stage :ready :profile control/default-profile
+             :scale [] :scale-name nil :wake [] :profile-choice nil
+             :held nil :silence nil :message nil)
+    2 (assoc state :stage :scale :profile nil :scale [] :scale-name nil
+             :wake [] :profile-choice nil :held nil :silence nil :message nil)
+    3 (assoc state :stage :wake :profile nil :scale default-scale :scale-name "C major"
+             :wake [] :profile-choice nil :held nil :silence nil :message nil)))
+
+
+(defn- capture-profile-note
+  [state {:keys [id midi onset-sample sample]}]
+  (let [choice (when (and (whole-number? midi) (<= midi 127))
+                 (control/degree control/default-profile :selector midi))]
+    (cond
+      (or (not (whole-number? id)) (<= id (:last-note-id state)) (:held state)) state
+      (#{1 2 3} choice)
+      (assoc state :stage :profile-release :last-note-id id :profile-choice choice
+             :held {:id id :midi midi :onset (or onset-sample sample)}
+             :silence nil :message nil)
+      :else (assoc state :message "Play C/D/E (scale degrees 1/2/3), or use the keyboard menu."))))
+
+
 (defn step
   "Custom setup receives confirmed engine notes after input is selected/opened.
-  Preview never invents notes or opens that input. Enter accepts the wake review."
+  Live setup can use C/D/E in the default scale for profile options 1/2/3. Preview
+  never invents notes or opens that input. Enter accepts the wake review."
   [state event]
   (let [event (normalize-event event)
         {:keys [type text sample id reason end-sample]} event
@@ -68,7 +99,8 @@
       (and (= :line type) (= "q" text)) (assoc state :stage :quit)
       (and (= :line type) (= "c" text))
       (if (and (:input state) (or (not (:headphones-required? state)) (:headphones? state)))
-        (assoc state :stage :profile :scale [] :wake [] :held nil)
+        (assoc state :stage :profile :profile nil :scale [] :scale-name nil :wake []
+               :profile-choice nil :held nil :silence nil)
         (assoc state :message "Select an input and confirm headphones before configuring."))
       (and (= :line type) (= :input stage))
       (if-let [index (when (re-matches #"[0-9]+" text) (parse-long text))]
@@ -76,40 +108,59 @@
           (let [input (nth (get-in state [:inventory :inputs]) (dec index))
                 line? (str/includes? (str/lower-case (:name input)) "fx100")]
             (assoc state :input input :monitor? line? :headphones? false :headphones-required? (not line?)
-                   :profile control/default-profile
-                   :stage (if line? :ready :headphones) :message nil))
+                   :profile nil
+                   :stage (if line? :profile :headphones) :message nil))
           (assoc state :message "Select a device from the current list."))
         (assoc state :message "Enter the input's list number, or q."))
       (and (= :line type) (= :headphones stage))
       (if (= "y" (str/lower-case text))
-        (assoc state :headphones? true :monitor? false :profile control/default-profile
-               :stage :ready :message nil)
+        (assoc state :headphones? true :monitor? false :profile nil
+               :stage :profile :message nil)
         (assoc state :message "Headphones are required; type y to confirm or q to quit."))
       (and (= :line type) (= :profile stage))
       (case text
-        ("" "1") (assoc state :profile control/default-profile :stage :ready :message nil)
-        "2" (assoc state :stage :scale :scale [] :wake [] :held nil :message nil)
-        (assoc state :message "Enter selects C major; 2 selects guitar-driven custom capture."))
+        ("" "1") (select-profile state 1)
+        "2" (select-profile state 2)
+        "3" (select-profile state 3)
+        (assoc state :message "Enter/1 uses the default; 2 captures a custom scale and wake; 3 captures a C-major wake."))
+      (and (= :capture-unavailable type) (#{:profile-release :scale :wake} stage))
+      (assoc state :stage :profile :profile nil :scale [] :scale-name nil :wake []
+             :profile-choice nil :held nil :silence nil
+             :message "Custom guitar capture requires --live; choose default C major or quit.")
       (and (= :line type) (= :review stage))
       (case text
         "" (assoc state :stage :ready :message nil)
         "r" (assoc state :stage :wake :wake [] :silence nil :profile nil)
         (assoc state :message "Enter accepts, r repeats wake capture, q quits."))
-      (and (= :gap type) (#{:scale :wake :review} stage))
-      (assoc state :stage (if (= :scale stage) :scale :wake)
-             (if (= :scale stage) :scale :wake) [] :held nil :silence nil
-             :message "Lost note event; capture reset. Play the phrase again.")
+      (and (= :gap type) (#{:profile-release :scale :wake :review} stage))
+      (let [next-stage (case stage :profile-release :profile :scale :scale :wake)]
+        (assoc state :stage next-stage
+               (if (= next-stage :scale) :scale :wake) []
+               :profile-choice nil :held nil :silence nil
+               :message "Lost note event; capture reset. Play the phrase again."))
+      (and (= :note-on type) (#{:profile :profile-release} stage))
+      (capture-profile-note state event)
       (and (= :note-on type) (#{:scale :wake} stage)) (capture-note state event)
       (= :note-off type)
       (if (and (:held state) (= id (get-in state [:held :id])))
         (if (and (whole-number? end-sample) (<= (get-in state [:held :onset]) end-sample sample))
-          (assoc state :held nil :silence (when (= :silence reason) end-sample))
+          (if (and (= :profile-release stage) (not= :silence reason))
+            (assoc state :stage :profile :profile-choice nil :held nil :silence nil
+                   :message "Menu note changed before silence; choose an option again.")
+            (assoc state :held nil :silence (when (= :silence reason) end-sample)))
           (step state {:type :gap})) state)
+      (and (= :tick type) (= :profile-release stage) (:silence state)
+           (nil? (:held state)) (>= (- (:sample state) (:silence state)) 44100)
+           (:profile-choice state))
+      (select-profile state (:profile-choice state))
       (and (= :tick type) (= :wake stage) (:silence state)
            (nil? (:held state)) (>= (- (:sample state) (:silence state)) 44100)
            (seq (:wake state)))
       (try
-        (assoc state :stage :review :profile (control/profile (:scale state) (:wake state)) :message nil)
+        (assoc state :stage :review
+               :profile (cond-> (control/profile (:scale state) (:wake state))
+                          (:scale-name state) (assoc :name (:scale-name state)))
+               :message nil)
         (catch Exception _
           (assoc state :wake [] :silence nil :message "Wake must be 3..6 scale notes; play it again.")))
       :else state)))
@@ -121,10 +172,13 @@
    (let [output (str "Output: " (get-in state [:output :name] "unavailable"))
          message (:message state)
          capture-help (if live-capture?
-                        "LIVE CAPTURE: play clean single notes; c returns to defaults, q quits."
-                        "OFFLINE PREVIEW: detector is not connected; c returns to defaults, q quits.")]
+                        "LIVE CAPTURE: play clean single notes; c returns to profile choice, q quits."
+                        "OFFLINE PREVIEW: no detector; custom capture requires --live, c returns to profile choice.")
+         header (if live-capture?
+                  "AUDIO LOOPER SETUP (--live; input capture with monitoring off)"
+                  "AUDIO LOOPER SETUP (no audio stream opened by this UI)")]
     (vec (concat
-           ["AUDIO LOOPER SETUP (no audio stream opened by this UI)" output]
+           [header output]
            (case (:stage state)
              :input (concat ["Input device:"]
                             (map-indexed #(str (inc %1) ". " (:name %2) " [" (:channels %2) " channels]")
@@ -133,7 +187,15 @@
              :headphones ["Microphone/unknown input: raw monitoring is OFF."
                           "Use headphones to prevent acoustic feedback. Headphones connected? [y/N]"]
              :profile ["Control setup:" "1. C major; wake = C5 D5 C5 D5 [default]"
-                       "2. Capture custom scale and wake with the guitar" "> [Enter]"]
+                       (if live-capture? "2. Capture custom scale and wake with the guitar"
+                           "2. Custom scale/wake capture requires --live")
+                       (if live-capture? "3. C major; capture a custom wake with the guitar"
+                           "3. Custom C-major wake capture requires --live")
+                       (if live-capture?
+                         "> Enter/1 or play C/D/E in the default scale for options 1/2/3"
+                         "> [Enter] or 1 selects C major")]
+             :profile-release [(str "Release the note for option " (:profile-choice state) ".")
+                               "Then wait for one second of silence."]
              :scale [(str "Play ascending scale + octave (8 notes): " (:scale state))
                      capture-help]
              :wake [(str "Play a 3..6-note wake, then one second of silence: " (:wake state))
@@ -148,7 +210,7 @@
 (defn resolve-session
   "Re-resolve volatile adcN/dacN identifiers by stable CoreAudio UID at startup."
   [state current]
-  (when-not (= :ready (:stage state))
+  (when-not (and (= :ready (:stage state)) (:profile state))
     (throw (ex-info "Setup is incomplete." {:type :incomplete-setup})))
   (when (and (:headphones-required? state) (not (:headphones? state)))
     (throw (ex-info "Microphone/unknown input requires explicit headphone confirmation."

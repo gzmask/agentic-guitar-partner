@@ -33,6 +33,7 @@ gkRecSlot init -1
 gkRec[] init 6
 gkStart[] init 6
 gkRecId[] init 6
+gkRecTarget[] init 6
 gkLength[] init 6
 gkOffset[] init 6
 gkPlay[] init 6
@@ -101,7 +102,8 @@ instr 2
     elseif kop != int(kop) || kop < 1 || kop > 10 || kid < 1 || kid != int(kid) || krawslot != kslot then
       gkFatal = 2
     elseif kop == 1 then
-      if gkRecSlot >= 0 || gkLength[kslot] > 0 || gkPlay[kslot] != 0 then
+      if gkRecSlot >= 0 || gkLength[kslot] > 0 || gkPlay[kslot] != 0 ||
+         klen < 0 || klen > __CAP__ || klen != int(klen) then
         gkFatal = 3
       elseif kat < gkClock || kat != int(kat) then
         gkFatal = 4
@@ -110,6 +112,7 @@ instr 2
         gkRec[kslot] = 1
         gkStart[kslot] = kat
         gkRecId[kslot] = kid
+        gkRecTarget[kslot] = klen
         gkOffset[kslot] = 0
       endif
     elseif kop == 2 then
@@ -148,6 +151,7 @@ instr 2
         gkRecSlot = -1
         gkOffset[kslot] = koffset
         gkLength[kslot] = kactual
+        gkRecTarget[kslot] = 0
         Emit 4, gkClock, kid, kslot+1, kactual, koffset, 0, 0, 0
       endif
     elseif kop == 3 then
@@ -158,6 +162,7 @@ instr 2
         gkRecSlot = -1
         gkLength[kslot] = 0
         gkOffset[kslot] = 0
+        gkRecTarget[kslot] = 0
         Emit 5, gkClock, kid, kslot+1, 0, 0, 0, 0, 0
       endif
     elseif kop == 4 || kop == 5 then
@@ -295,20 +300,25 @@ opcode Slot, aaa, aai
     if gkRec[islot] == 2 then
       kindex = kpos - gkStart[islot]
       if kindex >= 0 && kindex < __CAP__ then
-        tablew kinL, kindex, itabL
-        tablew kinR, kindex, itabR
-        knewblock = floor(kindex/441)
-        if knewblock != kblock then
-          kblock = knewblock
-          ksum = 0
-          kcount = 0
+        if gkRecTarget[islot] > 0 && kindex >= gkRecTarget[islot] then
+          gkRec[islot] = 3
+          Emit 10, kpos, gkRecId[islot], islot+1, kindex, 0, 0, 0, 0
+        else
+          tablew kinL, kindex, itabL
+          tablew kinR, kindex, itabR
+          knewblock = floor(kindex/441)
+          if knewblock != kblock then
+            kblock = knewblock
+            ksum = 0
+            kcount = 0
+          endif
+          ksum = ksum + (kinL*kinL + kinR*kinR)*0.5
+          kcount = kcount + 1
+          tablew sqrt(ksum/kcount), kblock, 500+islot
         endif
-        ksum = ksum + (kinL*kinL + kinR*kinR)*0.5
-        kcount = kcount + 1
-        tablew sqrt(ksum/kcount), kblock, 500+islot
       else
         gkRec[islot] = 3
-        Emit 10, kpos, 0, islot+1, 0, 0, 0, 0, 0
+        Emit 10, kpos, gkRecId[islot], islot+1, kindex, 0, 0, 0, 0
       endif
     endif
     if gkPlayNext[islot] > 0 && kpos == gkPlayAt[islot] then

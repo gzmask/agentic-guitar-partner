@@ -91,15 +91,94 @@
         :else (recur characters)))))
 
 
+(defn- refresh-session
+  [session]
+  (let [inventory (native/audio-devices!)
+        resolve-one (fn [direction selected]
+                      (let [matches (filter #(= (:uid selected) (:uid %)) (get inventory direction))]
+                        (when-not (= 1 (count matches))
+                          (throw (ex-info "Selected audio device disappeared; restart selection."
+                                          {:type :device-unavailable :uid (:uid selected)})))
+                        (first matches)))]
+    (assoc session :input (resolve-one :inputs (:input session))
+           :output (resolve-one :outputs (:output session)))))
+
+
+(defn- prepare-cache!
+  [cache]
+  (when-not @cache
+    (write! "Preparing finite voice prompts before audio starts...\n")
+    (reset! cache (voice/prepare!)))
+  nil)
+
+
+(defn- capture-setup!
+  [terminal deadline state cache]
+  (prepare-cache! cache)
+  (write! "\nOpening the selected input for profile selection/setup capture; monitoring is off.\n")
+  (let [session (refresh-session (select-keys state [:input :output]))
+        remaining (max 1.0 (min 600.0 (/ (- deadline (System/nanoTime)) 1e9)))
+        running (engine/open! {:live? true :input-device (get-in session [:input :id])
+                               :output-device (get-in session [:output :id])
+                               :input-channels (min 2 (get-in session [:input :channels]))
+                               :duration remaining :capacity control/capacity-samples
+                               :prompts [] :monitor? false :detect? true})]
+    (try
+      (loop [state state rendered nil]
+        (when (>= (System/nanoTime) deadline)
+          (throw (ex-info "UI session reached its safety time limit." {:type :session-limit})))
+        (if-not (#{:profile :profile-release :scale :wake} (:stage state))
+          state
+          (let [display (select-keys state [:stage :scale :wake :message :profile-choice])]
+            (when-not (= display rendered)
+              (when (:ansi? @terminal) (write! "\u001b[H\u001b[2J"))
+              (write! (str (str/join "\n" (map dashboard/safe-text (setup/prompt state true))) "\n")))
+            (let [key (native/read-key! 10)
+                  keyboard-choice? (and (= :profile (:stage state))
+                                         (#{\1 \2 \3 \newline \return} key))
+                  _ (when (and keyboard-choice? (:interactive? @terminal))
+                      (write! (if (#{\newline \return} key) "\n" (str key "\n"))))
+                  next-state
+                  (cond
+                    (or (= :eof key) (= \u0004 key) (= \q key))
+                    (setup/step state {:type :line :text "q"})
+                    (= \c key) (setup/step state {:type :line :text "c"})
+                    keyboard-choice?
+                    (setup/step state {:type :line
+                                       :text (if (#{\newline \return} key) "" (str key))})
+                    :else
+                    (let [snapshot (engine/poll! running)]
+                      (when (:ended? snapshot)
+                        (throw (ex-info "Setup capture engine ended unexpectedly."
+                                        {:type :engine-error :stage :setup-capture})))
+                      (let [state (reduce (fn [state event]
+                                            (if (#{:note-on :note-off} (:type event))
+                                              (setup/step state event) state))
+                                          state (:events snapshot))]
+                        (setup/step state {:type :tick :sample (:sample snapshot)}))))]
+              (recur next-state display)))))
+      (finally (engine/close! running)))))
+
+
 (defn- configure!
-  [terminal deadline]
+  [terminal deadline live-capture? cache]
   (loop [state (setup/initial-state (native/audio-devices!))]
     (when (:ansi? @terminal) (write! "\u001b[H\u001b[2J"))
-    (write! (str (str/join "\n" (map dashboard/safe-text (setup/prompt state))) "\n"))
+    (write! (str (str/join "\n" (map dashboard/safe-text
+                                       (setup/prompt state live-capture?))) "\n"))
     (case (:stage state)
       :ready (setup/resolve-session state (native/audio-devices!))
       :quit nil
       :error (throw (ex-info (:message state) {:type :device-unavailable}))
+      :profile (if live-capture?
+                 (recur (capture-setup! terminal deadline state cache))
+                 (let [line (line! terminal deadline)]
+                   (when-not (= :eof line)
+                     (recur (setup/step state {:type :line :text line})))))
+      (:profile-release :scale :wake)
+      (recur (if live-capture?
+               (capture-setup! terminal deadline state cache)
+               (setup/step state {:type :capture-unavailable})))
       (let [line (line! terminal deadline)]
         (when-not (= :eof line)
           (recur (setup/step state {:type :line :text line})))))))
@@ -126,24 +205,12 @@
     inventory))
 
 
-(defn- refresh-session
-  [session]
-  (let [inventory (native/audio-devices!)
-        resolve-one (fn [direction selected]
-                      (let [matches (filter #(= (:uid selected) (:uid %)) (get inventory direction))]
-                        (when-not (= 1 (count matches))
-                          (throw (ex-info "Selected audio device disappeared; restart selection."
-                                          {:type :device-unavailable :uid (:uid selected)})))
-                        (first matches)))]
-    (assoc session :input (resolve-one :inputs (:input session))
-           :output (resolve-one :outputs (:output session)))))
-
-
 (defn- warn-live!
   [session]
-  (write! (str "\nLIVE AUDIO WILL OPEN AFTER PROMPT PREPARATION\nInput: "
+  (write! (str "\nSTARTING LIVE PCM LOOPER\nInput: "
                (dashboard/safe-text (get-in session [:input :name]))
                "\nOutput: " (dashboard/safe-text (get-in session [:output :name]))
+               "\nSetup used the input with monitoring off; the looper engine opens now."
                "\nUse low volume/headphones; avoid direct-monitor doubling and feedback.\n")))
 
 
@@ -189,17 +256,16 @@
     (try
       (when-not (:interactive? @terminal)
         (throw (ex-info "--live requires foreground terminal input and output." {:type :terminal-required})))
-      (loop [session (configure! terminal deadline)]
+      (loop [session (configure! terminal deadline true cache)]
         (when session
           (warn-live! session)
           (when-not @cache
-            (write! "Preparing finite voice prompts before audio starts...\n")
-            (reset! cache (voice/prepare!)))
+            (prepare-cache! cache))
           (let [{:keys [exit-code reconfigure?]} (live-engine! terminal deadline session @cache)]
             (when-not (zero? exit-code)
               (throw (ex-info "Live engine exited with an error." {:exit exit-code})))
             (when reconfigure?
-              (recur (configure! terminal deadline))))))
+              (recur (configure! terminal deadline true cache))))))
       (finally
         (when @cache (voice/close! @cache))
         (close! terminal))))
@@ -214,7 +280,7 @@
   (let [deadline (+ (System/nanoTime) 599000000000)
         terminal (open! no-tui?)]
     (try
-      (when-let [session (if (:interactive? @terminal) (configure! terminal deadline)
+      (when-let [session (if (:interactive? @terminal) (configure! terminal deadline false nil)
                              (default-preview-session (native/audio-devices!)))]
         (loop [state (control/initial-state (:profile session))
                session session debug? false renderer (dashboard/renderer (:ansi? @terminal))]
@@ -229,7 +295,7 @@
                   (= \d key) (recur state session (not debug?) renderer)
                   (= \c key)
                   (if (setup/reconfigurable? state)
-                    (when-let [changed (configure! terminal deadline)]
+                    (when-let [changed (configure! terminal deadline false nil)]
                       (recur (control/initial-state (:profile changed)) changed debug?
                              (dashboard/renderer (:ansi? @terminal))))
                     (recur state session debug? renderer))

@@ -39,8 +39,9 @@ Csound integration has not yet been validated with live hardware.**
 The compact command grammar is wake → slot → wait for default recording,
 wake → slot → 2 for playback, wake → slot → 3 for erase, wake → slot → scrape
 to stop playback, and wake → scrape to exit. The selector is a shared prefix:
-empty slots auto-arm only after a two-second action window plus 350 ms recognition
-grace. Existing clips are never overwritten. Scrape commands are accepted while
+empty slots begin recording setup only after a two-second action window plus
+350 ms recognition grace. With a master, setup selects 1–6 full cycles; without a
+master it arms a free-length recording. Existing clips are never overwritten. Scrape commands are accepted while
 the relevant voice prompt is playing; note actions still wait for prompt guards.
 Playback cancellation uses a correlated native operation; if the start raced it,
 the host queues a boundary stop instead of claiming an immediate stop. Earlier
@@ -84,9 +85,12 @@ events, prompt playback/cancellation, and the actual `pitchamdf` lifecycle again
 the pure reference. Every recorded stereo sample is compared with its source.
 
 Only `--live` can open devices. It requires a foreground TTY and fresh UID-based
-device resolution. Input selection is the sole mandatory keyboard setup and uses
-the default C-major profile immediately. A warning is printed, but the explicit
-`--live` invocation replaces the former redundant typed `LIVE` confirmation.
+device resolution. Input selection is the sole mandatory keyboard setup; a
+post-input profile choice defaults to C major on Enter and offers custom scale/wake
+or C-major custom-wake capture in explicit `--live` mode. In live mode, C/D/E in
+the default scale also select menu options 1/2/3 after release and one second of
+silence. A warning is printed, but explicit `--live` replaces the former typed
+`LIVE` confirmation.
 
 ### Stage 1: pure control model
 
@@ -141,12 +145,18 @@ the default C-major profile immediately. A warning is printed, but the explicit
   FFI adapter, with no input/output stream. Device ordering matches the pinned
   Csound 6.18 rtauhal module's separate input/output numbering. Every UTF-8/array
   access is checked against the returned property size; CF strings are released.
-- Selecting the input completes startup with the default C-major profile; no
-  keyboard profile question or typed live confirmation remains. Other/unknown
-  inputs still require explicit headphone confirmation and default monitoring off.
-- The pure setup model retains custom-scale capture logic for offline validation,
-  but startup intentionally does not expose it: octave-independent degree matching
-  makes the default C-major profile usable across the guitar range.
+- After input selection, a profile choice accepts Enter/1 for default C major
+  and default wake, 2 for a custom scale and wake, or 3 for a custom wake on
+  C major. In `--live`, default-scale C/D/E also select options 1/2/3 after the
+  note is released and one second of silence. Other/unknown inputs require
+  headphone consent first; monitoring stays off.
+- In explicit `--live`, the selected input opens with monitoring off before the
+  profile choice and listens for guitar menu notes. The same setup stream supports
+  custom capture: option 2 captures eight scale notes before the wake; option 3
+  captures only a wake on C major. A keyboard review accepts or repeats the wake.
+  Offline preview never opens an audio stream.
+- The default C-major profile remains octave-independent and requires no guitar
+  setup beyond the normal command wake phrase.
 - Immutable snapshots contain slot states/durations/queues/cycles, profile and
   wake registers, pitch/event history, parser/voice/timeout state and the policy's
   own navigation menu. A compact layout retains the menu/footer on 24-row
@@ -371,16 +381,23 @@ and application exit use a short gain ramp rather than an instantaneous cut.
 
 ## Startup flow
 
-Only input selection requires a keyboard. Octave-independent degree matching
-makes one default C-major profile usable across the supported guitar range.
+Input selection is mandatory; the optional profile choice defaults to C major.
+In explicit `--live`, prompt preparation precedes a setup input stream with
+monitoring off. Keyboard selection remains available alongside the guitar menu.
 
 ```text
-1. Select input device using the keyboard.
-2. Attach the default C-major control profile.
-3. Generate and validate the finite prompt cache (audio is still closed).
-4. Re-resolve the selected device UID and open the audio engine.
-5. Show the dashboard and wait for the wake phrase.
-```
+1. Select input device using the keyboard; confirm headphones for microphones.
+2. Prepare the finite prompt cache before opening any audio stream.
+3. Open the setup input with monitoring off. Accept C major/default wake with
+   Enter, choose option 2 for custom scale/wake, or option 3 for a custom wake on
+   C major. In `--live`, C/D/E in the default scale select options 1/2/3; release
+   the note and wait for one second of silence.
+4. Option 2 captures eight scale notes first; either custom path then captures
+   and reviews the wake. Close the setup input after the profile is ready.
+5. Re-resolve the selected device UID and open the main looper engine.
+6. Show the dashboard and wait for the wake phrase.
+
+In offline preview, no setup stream is opened and profile selection is keyboard-only.
 
 Example:
 
@@ -390,12 +407,15 @@ Input device:
 2. Mac microphone
 > 1
 
-Default control: C major; wake degrees = 1 2 1 2
+Control setup:
+1. C major; wake = C5 D5 C5 D5 [default]
+2. Capture custom scale and wake with the guitar
+3. Keep C major; capture a custom wake
+> [Enter] selects C major/default wake; live guitar C/D/E selects 1/2/3
 ```
 
-Selecting the input completes configuration. Input device names must be
-resolved from the currently available CoreAudio devices; volatile `adcN` numbers
-must not be treated as permanent identities.
+Input device names must be resolved from the currently available CoreAudio
+devices; volatile `adcN` numbers must not be treated as permanent identities.
 
 Output uses the configured/default output device and is displayed in the
 terminal. An explicit output selector may be added without changing the command
@@ -426,18 +446,22 @@ from action selection, so both are matched by scale-degree pitch class in any
 supported octave. `C3 -> C3`, `C4 -> C5`, and mixed-octave wake phrases are
 therefore unambiguous in their respective parser phases.
 
-### Retained customization model
+### Custom profile capture
 
-The current startup intentionally skips this model and selects C major after the
-input. The pure setup reducer still validates an ascending seven-note scale plus
-the upper tonic for possible future exposure:
+Startup offers C major with its default wake, custom scale plus wake, or a custom
+wake on C major. Options 2 and 3 are available only in `--live`; the selected
+input is opened with monitoring disabled. Option 2 first captures an ascending
+seven-note scale plus the upper tonic:
 
 ```text
 1 2 3 4 5 6 7 1'
 ```
 
-The first note is explicitly the tonic. The eighth note validates the octave and
-completeness of the scale. The first seven captured pitches and, when they remain
+After the eight-note scale capture for option 2, or immediately for option 3,
+the player captures a 3–6-note wake and reviews it. Option 3 retains the standard
+C-major scale and changes only the wake. The first note in option 2 is explicitly
+the tonic; the eighth note validates the octave and completeness of the scale.
+The first seven captured pitches and, when they remain
 inside 70–1400 Hz, pitches one octave above are retained as display/playability
 references. High profiles fall back to their captured octave. Command execution
 matches their seven unique pitch classes, so the player may move any token to a
@@ -592,7 +616,7 @@ ANNOUNCING_READY
 
 WAIT_LOOP
   -- degree 1..6 --> ANNOUNCING_LOOP
-  -- degree 7 --> WAIT_EXIT_RELEASE
+  -- degree 7 --> BEGIN_EXIT
   -- invalid/timeout --> CANCELLED
 
 ANNOUNCING_LOOP
@@ -634,7 +658,7 @@ Multiple slots may play concurrently. Only one slot may be armed or recording.
 While any slot is recording, the guitar command channel accepts only:
 
 - record stop for that active slot;
-- the confirmed emergency/exit path.
+- the direct degree-7 exit path.
 
 Other loop commands are rejected. This prevents wake and command notes intended
 for one slot from being recorded into another slot's PCM waveform.
@@ -643,14 +667,19 @@ for one slot from being recorded into another slot's PCM waveform.
 
 ### Record start
 
-1. Recognize and validate the complete command.
-2. Announce that recording is armed.
+1. Recognize and validate the complete command. For a non-master clip, ask for
+   a length of 1–6 master cycles before arming; choices that exceed the 120-second
+   slot capacity are disabled.
+2. Announce that recording is armed (and repeat the selected cycle count for a
+   non-master clip).
 3. Wait for the voice prompt and guard interval to finish, and require confirmed
    silence after the command. A held final command note cannot start the recorder;
    cancel an unscheduled arm after four seconds waiting for release.
 4. Start at the selected synchronization boundary, planned from the current
    audio clock (not a past prompt/guard timestamp after a delayed poll).
-5. Emit a short non-pitched cue and announce/display `RECORDING`.
+5. Emit a short non-pitched cue and announce/display `RECORDING`. A non-master
+   take auto-finalizes at its selected full-cycle boundary; degree-2 stop remains
+   an early stop and keeps only completed cycles.
 
 No startup command or voice prompt may enter the recorded buffer.
 
@@ -683,10 +712,13 @@ The hardened default is a shared cycle:
 - The first successfully finalized clip establishes the master cycle length.
 - If no master exists, the first recording starts after its prompt/guard cue and
   ends at the stop wake's onset-derived sample boundary.
-- Later recordings start on the next master-cycle boundary.
-- Later recording lengths are complete integer multiples of the master cycle.
-- Their stop boundary is the latest completed master-cycle boundary at or before
-  the stop wake onset.
+- Later recordings start on the next master-cycle boundary after the player
+  selects 1–6 cycles. The host passes that exact sample count to Csound; Csound
+  freezes PCM at the requested boundary and emits a correlated limit event for
+  host finalization.
+- A non-master take automatically ends after its selected number of complete
+  cycles. A manual degree-2 early stop still uses the latest completed
+  master-cycle boundary at or before the stop wake onset.
 - Playback start and stop are queued to the next master-cycle boundary.
 - The terminal and voice distinguish `queued` from actual `started/stopped`.
 
@@ -719,16 +751,16 @@ only for a ready, stopped clip; it never implicitly stops a playing clip.
 
 ## Exit operation
 
-Exit is also destructive and requires confirmation:
+After the wake phrase, degree 7 immediately begins graceful exit:
 
 ```text
-WAKE -> degree 7 -> release -> prompt -> fresh degree 7 confirmation
+WAKE -> degree 7 -> mixer fade -> owned engine cleanup
 ```
 
-The second degree-7 note must be held for at least 800 ms and released. Any other
-note or timeout cancels exit.
+There is no second note, hold, or release confirmation. The exit note is accepted
+while recording as well as while idle; an incomplete take is never published.
 
-Confirmed exit:
+Exit:
 
 1. Fade the mixer over at least 30 ms.
 2. Stop/finalize or discard any active incomplete recording according to the
@@ -737,8 +769,7 @@ Confirmed exit:
 4. Restore the terminal.
 5. Return an accurate process exit status.
 
-Ctrl+C remains an immediate foreground safety stop and does not require a guitar
-confirmation.
+Ctrl+C remains an immediate foreground safety stop.
 
 ## Voice prompts
 
@@ -768,7 +799,6 @@ Minimum prompts:
 - Erased.
 - Invalid command and state-specific rejection.
 - Command cancelled.
-- Exit confirmation / exiting.
 - Maximum recording length reached.
 - Audio engine failure when it is safe to report one.
 
@@ -949,9 +979,9 @@ Run without audio devices and verify:
 - All state/operation policy combinations.
 - Duplicate commands are idempotent.
 - Prompt and guard states reject premature tokens.
-- Direct erase waits for a matching native acknowledgement; exit retains its
-  fresh held confirmation.
-- Invalid/timeout exit confirmation preserves buffers.
+- Direct erase waits for a matching native acknowledgement; one degree-7 exit
+  note after wake immediately starts graceful shutdown.
+- Exit and timeout paths never publish incomplete buffers.
 - Recording mode rejects commands for other slots.
 - Command suffixes cannot seed a new wake phrase.
 - Dashboard menu exactly matches policy output.
@@ -984,6 +1014,8 @@ Using generated temporary audio buffers:
 - Record-stop trimming uses wake onset/sample time, not confirmation time.
 - First/master recording outer silence is trimmed from bounded RMS summaries,
   with documented preroll/tail; synchronized later clips preserve cycle phase.
+- Non-master recording length selection is bounded by capacity and automatically
+  finalizes at exactly the selected number of master cycles.
 - Buffer bounds hold at zero, normal, and maximum durations.
 - Boundary crossfades avoid discontinuities.
 - Six concurrent players mix without clipping under the defined gain policy.
@@ -996,14 +1028,18 @@ Using generated temporary audio buffers:
 Only when the user requests and is ready to play:
 
 - FX100 and microphone selection.
-- Default C-major setup begins immediately after input selection.
+- Enter selects default C major/wake; options 2/3 capture custom scale/wake or
+  custom wake on C major. Live guitar C/D/E selects options 1/2/3; keyboard
+  selection remains available.
+- Custom capture receives eight ascending notes when needed, then a 3–6-note wake
+  and one second of silence; review/retake, `c`, and `q` close setup cleanly.
 - Wake recognition under clean and effected guitar tones.
 - Same-note staccato behavior.
 - Voice prompt timing and command guards.
 - Record/play/stop/erase on all six slots.
 - No command phrase in finalized recordings.
 - No prompt feedback with headphones.
-- Ctrl+C cleanup and confirmed guitar exit.
+- Ctrl+C cleanup and direct degree-7 guitar exit.
 
 ### Acceptance criteria
 
@@ -1011,7 +1047,7 @@ Only when the user requests and is ready to play:
   approximation.
 - A held pitch never becomes two command tokens.
 - Intentional repeated notes are reliably separable with documented articulation.
-- Exit cannot execute from a single unconfirmed token; erase is intentionally a
+- Degree 7 after wake directly starts graceful exit; erase is intentionally a
   direct action and still requires a selected stopped slot plus native acknowledgement.
 - No recording is silently overwritten.
 - Menus, spoken prompts, and actual accepted commands remain consistent.
