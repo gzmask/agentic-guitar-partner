@@ -153,7 +153,40 @@
       (engine/poll! running)
       (verify! "matching acknowledgement releases exactly the next operation"
                (and (= 2 (get @channels "h/seq")) (= 5 (get @channels "h/op"))
-                    (= 21 (get @channels "h/id")) (= 12000 (get @channels "h/at")))))))
+                    (= 21 (get @channels "h/id")) (= 12000 (get @channels "h/at"))))
+      (engine/enqueue! running {:type :playback-cancel :id 22 :loop-id 2 :cancel-operation-id 21})
+      (swap! channels assoc "h/ack" 2)
+      (engine/poll! running)
+      (verify! "playback cancellation transports the original operation ID"
+               (and (= 3 (get @channels "h/seq")) (= 10 (get @channels "h/op"))
+                    (= 22 (get @channels "h/id")) (= 21 (get @channels "h/arg")))))))
+
+
+(defn- check-scrape-transport!
+  []
+  (let [channels (atom {"engine/clock" 110000 "e/write" 1 "engine/fatal" 0 "h/ack" 0
+                        "ev/1/seq" 1 "ev/1/type" 12 "ev/1/sample" 110000
+                        "ev/1/id" 7 "ev/1/slot" 1 "ev/1/a" 101000 "ev/1/b" 0.95})
+        running {:instance :fake :transport (atom {:event-seq 0 :next-seq 1 :in-flight nil :queue []})}]
+    (with-redefs [native/check-health! (fn [_] nil)
+                  native/control (fn [_ channel] (get @channels channel 0))
+                  native/set-control! (fn [_ channel value] (swap! channels assoc channel value))
+                  native/finished? (fn [_] false)]
+      (let [snapshot (engine/poll! running)
+            event (first (:events snapshot))
+            state (-> (control/initial-state)
+                      (assoc :sample 100000 :active-recorder 1)
+                      (assoc-in [:slots 0 :record-state] :recording)
+                      (assoc-in [:slots 0 :record-start-id] 7)
+                      (assoc-in [:slots 0 :start-sample] 10000))
+            [state effects] (control/step state event)]
+        (verify! "scrape decodes recorder id and onset before ring acknowledgement"
+                 (and (= 1 (get @channels "e/ack")) (= 7 (:operation-id event))
+                      (= 101000 (:onset-sample event))))
+        (verify! "scrape transport requests finalization at the gesture onset"
+                 (and (= :record-finalize (:type (first effects)))
+                      (= 101000 (get-in state [:slots 0 :pending :boundary-sample]))
+                      (= :empty (get-in state [:slots 0 :clip-state]))))))))
 
 
 (defn check-runtime!
@@ -163,4 +196,5 @@
   (check-terminal-engine-states!)
   (check-quit-priority!)
   (check-engine-transport!)
+  (check-scrape-transport!)
   (println "PASS runtime reducer/effect dispatch, correlation, quit priority and engine endings"))

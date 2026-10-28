@@ -198,14 +198,14 @@
 (defn- check-policy!
   []
   (doseq [[clip record play expected]
-          [[:empty :idle :stopped [:enabled :disabled :disabled :no-op :disabled]]
-           [:empty :armed :stopped [:no-op :enabled :disabled :disabled :disabled]]
-           [:empty :recording :stopped [:no-op :enabled :disabled :disabled :disabled]]
-           [:empty :finalizing :stopped [:disabled :no-op :disabled :disabled :disabled]]
-           [:ready :idle :stopped [:disabled :disabled :enabled :no-op :enabled]]
-           [:ready :idle :playing [:disabled :disabled :no-op :enabled :disabled]]
-           [:ready :idle :queued-start [:disabled :disabled :no-op :disabled :disabled]]
-           [:ready :idle :queued-stop [:disabled :disabled :disabled :no-op :disabled]]]]
+          [[:empty :idle :stopped [:enabled :disabled :disabled :disabled :disabled]]
+           [:empty :armed :stopped [:no-op :disabled :disabled :disabled :disabled]]
+           [:empty :recording :stopped [:no-op :disabled :disabled :disabled :disabled]]
+           [:empty :finalizing :stopped [:disabled :disabled :disabled :disabled :disabled]]
+           [:ready :idle :stopped [:disabled :enabled :enabled :disabled :disabled]]
+           [:ready :idle :playing [:disabled :no-op :disabled :disabled :disabled]]
+           [:ready :idle :queued-start [:disabled :no-op :disabled :disabled :disabled]]
+           [:ready :idle :queued-stop [:disabled :disabled :disabled :disabled :disabled]]]]
     (let [state (assoc-in (control/initial-state) [:slots 0]
                           (merge (control/empty-slot 1)
                                  {:clip-state clip :record-state record :play-state play}))
@@ -221,16 +221,16 @@
           menu (control/operation-menu state 1)]
       (check! "menu is exactly policy data"
               (= menu (mapv #(control/policy state 1 %) (range 1 8))))
-      (check! "reserved operations disabled" (every? #(false? (:enabled? %)) (drop 5 menu)))
+      (check! "reserved operations disabled" (every? #(false? (:enabled? %)) (drop 3 menu)))
       (when (or (= :ready clip) (not= :idle record) (not= :stopped play))
         (check! "no clip overwrite" (not (and (:enabled? (first menu))
                                               (not (:no-op? (first menu)))))))
       (when (or (not= :ready clip) (not= :idle record) (not= :stopped play))
         (check! "erase only ready/stopped"
-                (false? (:enabled? (nth menu 4)))))))
+                (false? (:enabled? (nth menu 2)))))))
   (let [playing (assoc-in (ready-state) [:slots 0 :play-state] :playing)]
-    (check! "playback start is idempotent" (:no-op? (control/policy playing 1 3)))
-    (check! "playing erase disabled" (false? (:enabled? (control/policy playing 1 5))))
+    (check! "playback start is idempotent" (:no-op? (control/policy playing 1 2)))
+    (check! "playing erase disabled" (false? (:enabled? (control/policy playing 1 3))))
     (check! "ready record disabled" (false? (:enabled? (control/policy (ready-state) 1 1))))))
 
 
@@ -243,7 +243,10 @@
                             {:loop-id 1 :operation-id (:id request)
                              :start-sample (:at-sample request)})
         recording (settle recording)
-        [stopping stop-effects] (command recording 1 2)
+        onset (+ (:sample recording) 6000)
+        [stopping stop-effects] (send recording :scrape (+ onset 6000)
+                                     {:loop-id 1 :operation-id (:record-start-id (first (:slots recording)))
+                                      :onset-sample onset})
         request (get-in stopping [:slots 0 :pending])
         [ready _] (send stopping :record-finalized (+ (:sample stopping) 32)
                         {:loop-id 1 :operation-id (:id request) :buffer :pcm-one
@@ -252,9 +255,8 @@
     (check! "engine ack starts recording" (= :recording (get-in recording [:slots 0 :record-state])))
     (check! "other slot rejected while recording"
             (every? #(false? (:enabled? %)) (control/operation-menu recording 2)))
-    (check! "recording allows active-slot stop" (:enabled? (control/policy recording 1 2)))
-    (check! "stop uses wake onset, not confirmation"
-            (= (get-in stopping [:parser :wake-onset]) (:boundary-sample request)))
+    (check! "note operations disabled during recording" (every? #(false? (:enabled? %)) (control/operation-menu recording 1)))
+    (check! "stop uses scrape onset, not confirmation" (= onset (:boundary-sample request)))
     (check! "first clip asks the native engine for outer-silence trimming"
             (= 1 (:arg (first (filter #(= :record-finalize (:type %)) stop-effects)))))
     (check! "take stays unpublished during finalization"
@@ -279,18 +281,142 @@
     (let [synced (-> recording
                      (assoc :master {:origin-sample 0 :length-samples 44100})
                      (assoc-in [:slots 0 :start-sample] 88200))
-          [stop effects] (command synced 1 2)
+          onset (+ (:sample synced) 88200)
+          [stop effects] (send synced :scrape (+ onset 6000)
+                               {:loop-id 1 :operation-id (get-in synced [:slots 0 :record-start-id]) :onset-sample onset})
           boundary (get-in stop [:slots 0 :pending :boundary-sample])]
       (check! "synchronized later clips retain the shared cycle"
               (= 0 (:arg (first (filter #(= :record-finalize (:type %)) effects)))))
-      (check! "later stop quantizes at/before wake onset"
-              (and (zero? (mod boundary 44100))
-                   (<= boundary (get-in stop [:parser :wake-onset])))))))
+      (check! "later stop quantizes at/before scrape onset"
+              (and (zero? (mod boundary 44100)) (<= boundary onset))))))
+
+
+(defn- check-scrape-stop!
+  []
+  (let [recording (-> (control/initial-state)
+                      (assoc :sample 100000 :active-recorder 1)
+                      (assoc-in [:slots 0 :record-state] :recording)
+                      (assoc-in [:slots 0 :start-sample] 10000)
+                      (assoc-in [:slots 0 :record-start-id] 7))
+        [stopping effects] (send recording :scrape 110000 {:loop-id 1 :operation-id 7 :onset-sample 101000})
+        pending (get-in stopping [:slots 0 :pending])
+        [stale stale-effects] (send recording :scrape 110000 {:loop-id 1 :operation-id 8 :onset-sample 101000})
+        [bad _] (send recording :scrape 110000 {:loop-id 1 :operation-id 7 :onset-sample 110001})
+        [malformed _] (send recording :scrape 110000 {:loop-id 1 :operation-id 7 :onset-sample "bad"})
+        [ack _] (send stopping :record-finalized 110032 {:loop-id 1 :operation-id (:id pending)
+                                                          :buffer :pcm :length-samples (:length-samples pending)})
+        synced (assoc recording :master {:origin-sample 10000 :length-samples 20000})
+        [later _] (send synced :scrape 110000 {:loop-id 1 :operation-id 7 :onset-sample 101000})
+        speaking (assoc recording :voice {:state :speaking :id 55 :prompt :recording})
+        [prompt-stop prompt-effects] (send speaking :scrape 110000 {:loop-id 1 :operation-id 7 :onset-sample 101000})
+        early (assoc recording :master {:origin-sample 10000 :length-samples 200000})
+        [incomplete incomplete-effects] (send early :scrape 110000 {:loop-id 1 :operation-id 7 :onset-sample 101000})]
+    (check! "scrape immediately finalizes active recorder without wake"
+            (and (= :record-finalize (:type (first effects))) (= 101000 (:boundary-sample pending))))
+    (check! "scrape finalization remains unpublished until ack"
+            (and (= :empty (get-in stopping [:slots 0 :clip-state])) (= :pcm (get-in ack [:slots 0 :buffer]))))
+    (check! "stale recorder scrape is ignored" (and (= :recording (get-in stale [:slots 0 :record-state])) (empty? stale-effects)))
+    (check! "invalid scrape onset fails closed" (and (= :failed (:status bad)) (= :failed (:status malformed))))
+    (check! "later scrape retains complete master cycles" (= 90000 (get-in later [:slots 0 :pending :boundary-sample])))
+    (check! "scrape cancels a pending prompt before finalization"
+            (and (= [:prompt-cancel :record-finalize] (mapv :type prompt-effects))
+                 (= 55 (:prompt-id (first prompt-effects))) (nil? (:voice prompt-stop))))
+    (check! "scrape before one complete later cycle does not publish a clip"
+            (and (= :recording (get-in incomplete [:slots 0 :record-state]))
+                 (not-any? #(= :record-finalize (:type %)) incomplete-effects)))))
+
+
+(defn- check-global-stop!
+  []
+  (let [initial (control/initial-state)
+        [waking _] (note (first (note (first (note initial 72)) 74)) 72)
+        [waking _] (on waking 74 (+ (:sample waking) 8000))
+        [exit effects] (send waking :scrape (+ (:sample waking) 12000)
+                             {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample waking) 1000)})]
+    (check! "wake plus scrape exits even during ready prompt"
+            (and (= :exiting (:status exit)) (= :fade-mixer (:type (first effects)))))
+    (let [recording (-> waking (assoc :active-recorder 1)
+                        (assoc-in [:slots 0 :record-state] :recording)
+                        (assoc-in [:slots 0 :start-sample] 0)
+                        (assoc-in [:slots 0 :record-start-id] 7))
+          [exit effects] (send recording :scrape (+ (:sample recording) 12000)
+                               {:loop-id 1 :operation-id 7 :onset-sample (+ (:sample recording) 1000)})]
+      (check! "wake plus scrape exits rather than finalizing active recording"
+              (and (= :exiting (:status exit)) (= :fade-mixer (:type (first effects)))
+                   (= 1 (:discard-recording (first effects)))))))
+  (let [initial (control/initial-state)
+        [ignored effects] (send initial :scrape 10000 {:loop-id 0 :operation-id 0 :onset-sample 1000})
+        waking (wake initial)
+        [stale stale-effects] (send waking :scrape (+ (:sample waking) 12000)
+                                    {:loop-id 0 :operation-id 0 :onset-sample 0})]
+    (check! "scrape without wake or recording has no effect" (and (= :running (:status ignored)) (empty? effects)))
+    (check! "scrape beginning before wake completion cannot exit" (and (= :running (:status stale)) (empty? stale-effects))))
+  (let [waiting (select-loop (ready-state) 1)
+        playing (assoc-in waiting [:slots 0 :play-state] :playing)
+        [stop effects] (send playing :scrape (+ (:sample playing) 12000)
+                             {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample playing) 1000)})]
+    (check! "selected scrape queues playback stop at master boundary"
+            (and (= :queued-stop (get-in stop [:slots 0 :play-state]))
+                 (= :play-queue (:type (first effects)))
+                 (= :playback-stop (:operation (first effects)))
+                 (zero? (mod (get-in stop [:slots 0 :pending :at-sample]) 44100)))))
+  (let [queued (first (command (ready-state) 1 2))
+        selected (select-loop queued 1)
+        start (get-in selected [:slots 0 :pending])
+        [cancelling effects] (send selected :scrape (+ (:sample selected) 10000)
+                                   {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample selected) 1000)})
+        cancel (get-in cancelling [:slots 0 :pending])
+        [cancelled _] (send cancelling :playback-cancelled (+ (:sample cancelling) 32)
+                            {:loop-id 1 :operation-id (:id cancel) :cancelled? true})
+        [started _] (send cancelling :playback-started (max (:sample cancelling) (:at-sample start))
+                          {:loop-id 1 :operation-id (:id start) :at-sample (:at-sample start)})
+        [raced race-effects] (send started :playback-cancelled (+ (:sample started) 32)
+                                    {:loop-id 1 :operation-id (:id cancel) :cancelled? false})]
+    (check! "scrape cancels queued start without claiming it stopped prematurely"
+            (and (= :playback-cancel (:type (first effects))) (= :queued-stop (get-in cancelling [:slots 0 :play-state]))
+                 (= (:id start) (:cancel-operation-id (first effects)))))
+    (check! "cancel acknowledgement publishes stopped"
+            (and (= :stopped (get-in cancelled [:slots 0 :play-state])) (= :pcm-one (get-in cancelled [:slots 0 :buffer]))))
+    (check! "start/cancel race queues a real boundary stop"
+            (and (= :playback-stop (get-in raced [:slots 0 :pending :type]))
+                 (= :play-queue (:type (first race-effects))))))
+  (let [selected (select-loop (control/initial-state) 1)
+        [before _] (control/step selected {:type :tick :sample (get-in selected [:parser :deadline])})
+        [armed effects] (control/step before {:type :tick :sample (+ (get-in selected [:parser :deadline])
+                                                                      control/action-confirmation-grace)})]
+    (check! "confirmation grace prevents premature default record" (nil? (:active-recorder before)))
+    (check! "empty selected slot defaults to recording after action window"
+            (and (= :armed (get-in armed [:slots 0 :record-state]))
+                 (= :recording-armed (:prompt (first effects))))))
+  (let [waiting (select-loop (ready-state) 1)
+        deadline (get-in waiting [:parser :deadline])
+        [guarded _] (control/step waiting {:type :tick :sample deadline})
+        [playing _] (send guarded :note-on (+ deadline 5000)
+                          {:id (inc (:last-note-id guarded)) :midi 74 :cents 0 :onset-sample (- deadline 1000)})]
+    (check! "note begun before deadline is accepted during detector grace"
+            (= :playback-start (get-in playing [:slots 0 :pending :type]))))
+  (let [selected (select-loop (ready-state) 1)
+        [state effects] (control/step selected {:type :tick :sample (+ (get-in selected [:parser :deadline])
+                                                                        control/action-confirmation-grace)})]
+    (check! "selection timeout never overwrites an existing clip"
+            (and (= :pcm-one (get-in state [:slots 0 :buffer]))
+                 (not-any? #(= :record-start (:type %)) effects))))
+  (let [playing (first (command (ready-state) 1 2))
+        [erasing _] (command (ready-state) 1 3)]
+    (check! "degree 2 starts replay" (= :playback-start (get-in playing [:slots 0 :pending :type])))
+    (check! "degree 3 erases" (= :buffer-erase (get-in erasing [:slots 0 :pending :type]))))
+  (let [[armed _] (command (control/initial-state) 1 1)
+        onset (+ (:sample armed) 2000)
+        [cancelled effects] (send armed :scrape (+ onset 8000)
+                                  {:loop-id 0 :operation-id 0 :onset-sample onset})]
+    (check! "scrape cancels an unscheduled armed recording and its prompt"
+            (and (nil? (:active-recorder cancelled)) (= :empty (get-in cancelled [:slots 0 :clip-state]))
+                 (= :prompt-cancel (:type (first effects)))))))
 
 
 (defn- check-destructive!
   []
-  (let [[erasing effects] (command (ready-state) 1 5)
+  (let [[erasing effects] (command (ready-state) 1 3)
         pending (get-in erasing [:slots 0 :pending])
         [erased _] (send erasing :buffer-erased (+ (:sample erasing) 32)
                          {:loop-id 1 :operation-id (:id pending)})]
@@ -302,25 +428,22 @@
     (check! "erase publishes empty after engine acknowledgement"
             (= :empty (get-in erased [:slots 0 :clip-state])))
     (check! "last erased clip resets master" (nil? (:master erased))))
-  (let [wait-loop (settle (wake (control/initial-state)))
-        [request _] (note wait-loop 71)
-        waiting (settle request)
-        [held _] (on waiting 71 (+ (:sample waiting) 8000))
-        [exiting _] (off held (+ (:sample held) 44100))
-        exiting (settle exiting)]
-    (check! "single exit token does not exit" (= :running (:status request)))
-    (check! "exit waits for a held release" (= :running (:status held)))
-    (check! "confirmed exit begins graceful shutdown" (= :exiting (:status exiting)))
+  (let [waiting (settle (wake (control/initial-state)))
+        [exiting _] (send waiting :scrape (+ (:sample waiting) 10000)
+                          {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample waiting) 1000)})]
+    (check! "wake plus scrape begins graceful shutdown" (= :exiting (:status exiting)))
     (check! "exit ramp is at least 30ms" (>= (get-in exiting [:shutdown :duration-samples]) 1323))))
 
 
 (defn- check-playback!
   []
-  (let [[queued effects] (command (ready-state) 1 3)
+  (let [[queued effects] (command (ready-state) 1 2)
         pending (get-in queued [:slots 0 :pending])
         [playing _] (send queued :playback-started (max (:sample queued) (:at-sample pending))
                           {:loop-id 1 :operation-id (:id pending) :at-sample (:at-sample pending)})
-        [stopping _] (command playing 1 4)
+        selected (select-loop playing 1)
+        [stopping _] (send selected :scrape (+ (:sample selected) 10000)
+                           {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample selected) 1000)})
         stop (get-in stopping [:slots 0 :pending])
         [stopped _] (send stopping :playback-stopped (max (:sample stopping) (:at-sample stop))
                           {:loop-id 1 :operation-id (:id stop) :at-sample (:at-sample stop)})]
@@ -331,7 +454,7 @@
     (check! "stop waits for its boundary" (= :queued-stop (get-in stopping [:slots 0 :play-state])))
     (check! "stop retains PCM" (= :pcm-one (get-in stopped [:slots 0 :buffer])))
     (check! "stop ack changes play state" (= :stopped (get-in stopped [:slots 0 :play-state])))
-    (let [[duplicate effects] (command queued 1 3)]
+    (let [[duplicate effects] (command queued 1 2)]
       (check! "duplicate queued start keeps operation id" (= pending (get-in duplicate [:slots 0 :pending])))
       (check! "duplicate queued start emits no second operation"
               (not-any? #(= :play-queue (:type %)) effects))))
@@ -341,7 +464,7 @@
                                   {:clip-state :ready :buffer id :length-samples (* id 44100)}))
                          (range 1 7)))
         playing (reduce (fn [state id]
-                          (let [[state _] (command state id 3)
+                          (let [[state _] (command state id 2)
                                 pending (get-in state [:slots (dec id) :pending])]
                             (first (send state :playback-started (max (:sample state) (:at-sample pending))
                                          {:loop-id id :operation-id (:id pending) :at-sample (:at-sample pending)}))))
@@ -379,7 +502,9 @@
         now (get-in guarded [:voice :until])
         [queued _] (control/step guarded {:type :tick :sample now})
         at (get-in queued [:slots 1 :pending :at-sample])
-        [cancelled _] (command queued 2 2)]
+        [cancelled _] (send queued :scrape (+ (:sample queued) 10000)
+                            {:loop-id 2 :operation-id (get-in queued [:slots 1 :pending :id])
+                             :onset-sample (+ (:sample queued) 1000)})]
     (check! "later recording starts strictly on next shared boundary"
             (and (> at now) (zero? (mod at 44100)) (< (- at now) 44101)))
     (check! "armed recorder can be cancelled without publishing a take"
@@ -411,15 +536,15 @@
   (let [two (assoc-in (ready-state) [:slots 1]
                       (merge (control/empty-slot 2)
                              {:clip-state :ready :buffer :pcm-two :length-samples 88200}))
-        [erasing _] (command two 1 5)
+        [erasing _] (command two 1 3)
         pending (get-in erasing [:slots 0 :pending])
         [erased _] (send erasing :buffer-erased (+ (:sample erasing) 32)
                          {:loop-id 1 :operation-id (:id pending)})]
     (check! "erase affects only selected slot" (= :pcm-two (get-in erased [:slots 1 :buffer])))
     (check! "master survives erasure of its original slot" (= (:master two) (:master erased))))
-  (let [waiting (settle (first (note (settle (wake (control/initial-state))) 71)))
-        [held _] (on waiting 71 (+ (:sample waiting) 8000))
-        exiting (settle (first (off held (+ (:sample held) 44100))))
+  (let [waiting (settle (wake (control/initial-state)))
+        exiting (first (send waiting :scrape (+ (:sample waiting) 10000)
+                             {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample waiting) 1000)}))
         [early _] (send exiting :mixer-faded (+ (:sample exiting) 32)
                         {:operation-id (get-in exiting [:shutdown :id])})
         [stale effects] (send exiting :mixer-faded (+ (:sample exiting) 32) {:operation-id 99999})
@@ -483,7 +608,9 @@
                          ["wake/parser/prompt guards" check-parser!]
                          ["policy/menu state matrix" check-policy!]
                          ["record/finalize policy" check-recording!]
-                         ["direct erase and confirmed exit" check-destructive!]
+                         ["scrape stop" check-scrape-stop!]
+                         ["global scrape stop and compact grammar" check-global-stop!]
+                         ["direct erase and scrape exit" check-destructive!]
                          ["six-slot playback policy" check-playback!]
                          ["synchronization/capacity" check-boundaries!]
                          ["erase isolation and exit completion" check-confirmation-guards!]

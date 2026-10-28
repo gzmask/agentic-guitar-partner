@@ -59,7 +59,7 @@
             fields {"h/op" (get dsp/operation-codes (:type operation))
                     "h/id" (:id operation) "h/slot" (dec (or (:loop-id operation) 1))
                     "h/at" (or (:at-sample operation) 0) "h/length" (or (:length-samples operation) 0)
-                    "h/arg" (or (:arg operation) 0)}]
+                    "h/arg" (or (:arg operation) (:cancel-operation-id operation) 0)}]
         (doseq [[channel value] fields] (native/set-control! instance channel value))
         (native/set-control! instance "h/seq" sequence)
         (reset! (:transport engine) (assoc state :queue (vec (rest (:queue state)))
@@ -80,6 +80,9 @@
       :note-off (merge base {:id id :end-sample (long a) :reason (if (== b 1) :silence :pitch-change)})
       :prompt-finished (assoc base :id id)
       :record-limit (assoc base :loop-id slot)
+      :scrape (assoc base :loop-id slot :operation-id id :onset-sample (long a) :score b)
+      :playback-cancelled (assoc base :loop-id slot :operation-id id
+                                 :cancelled? (cond (== a 1) true (== a 0) false :else nil))
       :mixer-faded (assoc base :operation-id id)
       (merge base {:loop-id slot :operation-id id}
              (case type
@@ -128,4 +131,7 @@
          :ended? (native/finished? instance)
          :pitch {:hz hz :db (native/control instance "pitch/db")
                  :midi (when (<= 70 hz 1400) (long (native/control instance "pitch/midi")))
-                 :cents (native/control instance "pitch/cents") :gate? (pos? (native/control instance "pitch/gate"))}}))))
+                 :cents (native/control instance "pitch/cents") :gate? (pos? (native/control instance "pitch/gate"))}
+         :scrape {:score (native/control instance "scrape/score")
+                  :db (native/control instance "scrape/db")
+                  :noise (native/control instance "scrape/noise")}}))))

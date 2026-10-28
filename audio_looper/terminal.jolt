@@ -167,7 +167,7 @@
                         (>= (System/nanoTime) deadline))
               [state exit-code] (runtime/advance! running cache state snapshot quit?)
               context (merge session (native/terminal-size!)
-                             {:preview? false :debug? debug? :pitch (:pitch snapshot)})
+                             {:preview? false :debug? debug? :pitch (:pitch snapshot) :scrape (:scrape snapshot)})
               [renderer frame] (dashboard/plan renderer (dashboard/view state context)
                                                  (quot (System/nanoTime) 1000000))]
           (when frame (write! frame))

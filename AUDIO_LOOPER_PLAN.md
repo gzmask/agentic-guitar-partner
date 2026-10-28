@@ -3,6 +3,49 @@
 ## Status
 
 This document is the design and verification record for the looper POC.
+
+### Experimental global low-E scrape stop
+
+The Csound detector in `audio_looper/scrape.jolt` compares 24 normalized
+900–5500 Hz stereo-power bands against a fingerprint derived from one low-E
+scrape on the user's FX100. No captured PCM is stored in the repository. It
+uses a 2048-sample Hann window, 441-sample hop, an approximately 0.8-second
+noise calibration, a 0.90 match threshold, a 12 dB signal-to-noise gate,
+spectral-shape guards and 12 matching frames with bounded gaps. A detection
+emits the estimated first matching window onset through the existing sequenced
+event ring, with a native recorder ID when one is active. In recording state,
+the gesture cancels an arm or requests finalization without wake. After wake it
+exits; after selecting a slot it stops playback or cancels its queued start.
+Gestures preceding the relevant wake/selection onset are ignored. Exit takes
+precedence over an active recording and discards it. Engine acknowledgement
+remains the sole publication point.
+
+First/master recordings use that onset (then the existing outer-silence trim).
+Later recordings stop at the last completed master boundary before the onset;
+if no complete cycle exists, recording continues. FFT windowing means onset is
+an estimate and may precede physical string contact. Failed detections remain in
+the recording, and false detections can stop it early. This single-example
+fingerprint is experimental and not validated across guitars, tones, levels,
+normal playing or hardware. `[d]` exposes match, level, and noise. No new service, audio process, per-block
+host DSP, or live input was added by this change.
+
+Offline verification includes a generated 24-band synthetic positive fixture,
+inverted stereo channels, a pitched negative, ring/correlation and pending-ack
+checks, queued-playback cancellation/race handling, and PCM preservation. Separately, the real FX100 recording used to design
+it was evaluated offline from `/tmp`; it is neither a committed fixture nor a
+substitute for testing false positives and generalization. **The production
+Csound integration has not yet been validated with live hardware.**
+
+The compact command grammar is wake → slot → wait for default recording,
+wake → slot → 2 for playback, wake → slot → 3 for erase, wake → slot → scrape
+to stop playback, and wake → scrape to exit. The selector is a shared prefix:
+empty slots auto-arm only after a two-second action window plus 350 ms recognition
+grace. Existing clips are never overwritten. Scrape commands are accepted while
+the relevant voice prompt is playing; note actions still wait for prompt guards.
+Playback cancellation uses a correlated native operation; if the start raced it,
+the host queues a boundary stop instead of claiming an immediate stop. Earlier
+design sections below are historical where they describe the old note grammar.
+
 Implementation covers **stages 0–6**, passes the complete offline suite, and has
 completed multiple real FX100/guitar validation passes. Those passes validated
 end-to-end PCM recording/playback and drove octave-independent commands,
@@ -52,32 +95,31 @@ the default C-major profile immediately. A warning is printed, but the explicit
   engine acknowledgement is validated. Engine errors return a failing exit effect.
 - Eight ascending scale pitches validate the seven-degree mapping and octave.
   Wake vectors retain captured MIDI pitches for display and degrees for parsing.
-  Wake, selector, action, and confirmation matching is octave-independent within
+  Wake, selector and action matching is octave-independent within
   the detector range; parser phase disambiguates selection from action.
 - The note reference distinguishes estimated onset from confirmation and silence
   onset from release confirmation. Held notes, brief gate dips and direct octave
   changes have explicit lifecycle checks. The production native detector is
   checked against this reference on captured engine estimates; it is not a
   host-driven real-time DSP path.
-- Wake suffix recovery, four-second phrase/command windows, ±35-cent matching,
+- Wake suffix recovery, a four-second wake window, two-second action window, ±35-cent matching,
   consumed commands, prompt-completion IDs, 125 ms guards and 250 ms cooldowns
   are covered. Tokens during speech/guards are consumed, never deferred.
 - Every policy row generates the same menu data used by command validation.
   The global restriction while a recorder is active (including armed/finalizing)
-  takes precedence over local no-op entries: only its record-stop and the exit
-  path remain available. There is no overwrite, overdub, or second recorder.
+  takes precedence over local no-op entries: direct scrape stops recording and
+  wake followed by scrape exits. There is no overwrite, overdub, or second recorder.
 - Record start waits for both prompt/guard completion **and confirmed command
   silence**. Otherwise a held final control note would leak into PCM. An
   unscheduled arm times out after four seconds waiting for release. A delayed
   poll plans a start from the current sample clock, never in the past.
-- Record stop uses the first wake note's onset, and later takes/playback use the
-  shared master boundaries. First finalization establishes the period; erasing
+- Record stop uses a matched low-E scrape onset, and later takes/playback use
+  the shared master boundaries. First finalization establishes the period; erasing
   its original slot retains it until all clips are empty. The native engine
   freezes writing exactly at capacity before notifying the host.
 - Erase is a direct phase-disambiguated action like record/play operations and
   still waits for its matching native acknowledgement before publishing empty.
-  Exit alone requires release, a fresh note held for at least 800 ms, and confirmed
-  silence before the mixer fade.
+  Wake followed by scrape immediately starts the mixer fade and graceful exit.
 - One global engine event sequence rejects duplicates and cancels parsing on a
   gap. If an audio operation is in flight, a gap fails closed with shutdown rather
   than guessing whether it ran. Effect IDs are separately monotonic correlation

@@ -1,16 +1,18 @@
 (ns audio-looper.dsp
   "Csound owns PCM, analysis and sample clocks; no guitar-command grammar here."
-  (:require [clojure.string :as str]))
+  (:require [audio-looper.scrape :as scrape]
+            [clojure.string :as str]))
 
 
 (def ring-size 128)
 (def fields ["type" "sample" "id" "slot" "a" "b" "c" "d" "e"])
 (def operation-codes {:record-start 1 :record-finalize 2 :record-cancel 3
                       :playback-start 4 :playback-stop 5 :buffer-erase 6
-                      :prompt 7 :prompt-cancel 8 :fade-mixer 9})
+                      :prompt 7 :prompt-cancel 8 :fade-mixer 9 :playback-cancel 10})
 (def event-types {1 :note-on 2 :note-off 3 :record-started 4 :record-finalized
                   5 :record-cancelled 6 :playback-started 7 :playback-stopped
-                  8 :buffer-erased 9 :prompt-finished 10 :record-limit 11 :mixer-faded})
+                  8 :buffer-erased 9 :prompt-finished 10 :record-limit 11 :mixer-faded
+                  12 :scrape 13 :playback-cancelled})
 
 
 (defn quote-path
@@ -96,7 +98,7 @@ instr 2
     kslot = int(limit(krawslot, 0, 5))
     if kseq != gkOpSeq + 1 then
       gkFatal = 1
-    elseif kop != int(kop) || kop < 1 || kop > 9 || kid < 1 || kid != int(kid) || krawslot != kslot then
+    elseif kop != int(kop) || kop < 1 || kop > 10 || kid < 1 || kid != int(kid) || krawslot != kslot then
       gkFatal = 2
     elseif kop == 1 then
       if gkRecSlot >= 0 || gkLength[kslot] > 0 || gkPlay[kslot] != 0 then
@@ -193,6 +195,17 @@ instr 2
     elseif kop == 8 then
       if gkPromptId == karg && gkPrompt > 0 then
         gkPromptCancel = gkClock
+      endif
+    elseif kop == 10 then
+      if karg < 1 || karg != int(karg) || gkPlayId[kslot] != karg then
+        gkFatal = 3
+      elseif gkPlayNext[kslot] == 1 && gkPlay[kslot] == 0 then
+        gkPlayNext[kslot] = 0
+        Emit 13, gkClock, kid, kslot+1, 1, 0, 0, 0, 0
+      elseif gkPlayNext[kslot] == 0 && gkPlay[kslot] == 1 then
+        Emit 13, gkClock, kid, kslot+1, 0, 0, 0, 0, 0
+      else
+        gkFatal = 3
       endif
     elseif kop == 9 then
       if gkFadeAt < 0 then
@@ -486,7 +499,8 @@ endin")
                          ["chn_k \"e/ack\", 1\n"]
                          (map #(str "chn_k \"" % "\", 2\n")
                               ["h/ack" "e/write" "engine/clock" "engine/fatal" "engine/peak"
-                               "pitch/hz" "pitch/db" "pitch/midi" "pitch/cents" "pitch/gate"])
+                               "pitch/hz" "pitch/db" "pitch/midi" "pitch/cents" "pitch/gate"
+                               "scrape/score" "scrape/db" "scrape/noise"])
                          (for [i (range 6)] (str "chn_k \"slot/" i "/length\", 2\n"))
                          (for [i (range ring-size) field (conj fields "seq")]
                            (str "chn_k \"ev/" i "/" field "\", 2\n")))
@@ -515,10 +529,11 @@ endin")
              (str "-+rtaudio=coreaudio -i" input-device " -o" output-device))
          "\n</CsOptions>\n<CsInstruments>\nsr=44100\nksmps=32\nnchnls=2\nnchnls_i=" input-channels "\n0dbfs=1\n"
          (apply str channels) (apply str tables)
+         "giScrapeTemplate ftgen 800, 0, -24, -2, " (str/join "," scrape/template) "\n"
          "giPromptLengths[] fillarray " (str/join "," (if (seq prompts) (map :frames prompts) [1])) "\n"
          (when trace? (str "giTrace ftgen 300, 0, -" (* 3 (inc (long (Math/ceil (/ (* duration 44100) 32))))) ", -2, 0\n"))
-         body "\n</CsInstruments>\n<CsScore>\n"
-         (apply str (for [instrument [1 2 10 30 90]] (str "i " instrument " 0 " duration "\n")))
+         body "\n" scrape/orchestra "\n</CsInstruments>\n<CsScore>\n"
+         (apply str (for [instrument [1 2 10 11 30 90]] (str "i " instrument " 0 " duration "\n")))
          (apply str (for [i (range 6)] (str "i 20." (inc i) " 0 " duration " " i "\n")))
          (apply str (map-indexed (fn [index op]
                                   (str "i 99 " (/ (:sample op) 44100.0) " 0.001 "

@@ -6,7 +6,7 @@
 ;; Jolt 0.8.10 load-file leaves the last loaded namespace current.
 (let [entry-namespace (ns-name *ns*)]
   (doseq [source ["notes.jolt" "control.jolt" "control_checks.jolt" "csound.jolt"
-                  "wav.jolt" "dsp.jolt" "engine.jolt" "voice.jolt" "runtime.jolt"
+                  "wav.jolt" "scrape.jolt" "dsp.jolt" "engine.jolt" "voice.jolt" "runtime.jolt"
                   "runtime_checks.jolt" "setup.jolt" "dashboard.jolt" "ui_checks.jolt" "engine_checks.jolt"
                   "terminal.jolt"]]
     (load-file (.getPath (io/file (or (.getParent (io/file *file*)) ".")
