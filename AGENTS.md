@@ -39,7 +39,9 @@ or a generic benchmark framework unless explicitly requested. There are no
 - Input selection is the only mandatory keyboard setup for FX100. Startup offers
   C major/default wake (Enter), custom wake on C major, or custom scale/wake in
   explicit `--live` mode; C/D/E in the default scale select menu options 1/2/3.
-- Erase is a direct selected-slot command; wake plus degree-7 exit starts the graceful fade immediately, with no extra confirmation or hold.
+- Erase is a direct selected-slot command. Scrape low E to stop recording,
+  stop selected-slot playback after wake and selection, or exit after wake. Exit
+  starts the graceful fade immediately, with no extra confirmation or hold.
 - The first/master clip may trim outer silence with documented preroll/tail.
   Later synchronized clips must preserve complete master-cycle phase.
 

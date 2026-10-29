@@ -163,6 +163,18 @@
     (doseq [text ["OFFLINE PREVIEW" "Fx100" "Headphones" "LOOPERS" "PITCH" "AVAILABLE" "EVENTS"]]
       (verify! (str "required dashboard section: " text) (str/includes? rendered text)))
     (verify! "all six slots are visible" (= 6 (count (:slots snapshot))))
+    (let [recording (-> (control/initial-state)
+                        (assoc :active-recorder 1)
+                        (assoc-in [:slots 0 :record-state] :recording)
+                        (assoc-in [:slots 0 :start-sample] 0))
+          view (dashboard/view recording (assoc context :debug? true
+                                                 :scrape {:score 0.94 :db -55.0 :noise -90.0}))
+          output (dashboard/render view)]
+      (verify! "recording shows direct scrape stop" (str/includes? output "Scrape low E to stop"))
+      (verify! "debug shows scrape score" (str/includes? output "Scrape match=0.94"))
+      (let [[renderer _] (dashboard/plan (dashboard/renderer false) view 0)
+            [_ line] (dashboard/plan renderer (assoc view :scrape "Scrape match=0.95") 100)]
+        (verify! "plain debug output shows updated scrape score" (str/includes? line "Scrape match=0.95"))))
     (let [queued (-> state
                      (assoc :parser {:phase :dormant :tokens []} :sample 10)
                      (assoc-in [:slots 0 :play-state] :queued-start)

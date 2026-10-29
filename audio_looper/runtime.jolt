@@ -21,7 +21,7 @@
               :prompt-cancel (do (engine/enqueue! running (assoc effect :arg (:prompt-id effect))) exit-code)
               :fade-mixer (do (engine/discard-queued! running)
                               (engine/enqueue! running (assoc effect :length-samples (:duration-samples effect))) exit-code)
-              (:record-start :record-finalize :record-cancel :buffer-erase)
+              (:record-start :record-finalize :record-cancel :buffer-erase :playback-cancel)
               (do (engine/enqueue! running effect) exit-code)
               (throw (ex-info "Unhandled controller effect." {:effect effect}))))
           nil effects))

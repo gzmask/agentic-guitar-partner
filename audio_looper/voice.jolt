@@ -11,7 +11,7 @@
    :finalizing "Wait for recording to finish."
    :clip-exists "A clip already exists. Erase it before recording again."
    :not-recording "That looper is not recording."
-   :recording-active "Only stop the active recording, or exit."
+   :recording-active "Scrape to stop recording, or wake and scrape to exit."
    :cycle-exceeds-capacity "No complete master cycle fits within recording capacity."
    :empty "That looper is empty."
    :stop-before-erase "Stop playback before erasing the clip."
@@ -36,7 +36,7 @@
 
 (defn phrases
   []
-  (into {[:ready] "Ready. Select looper."
+  (into {[:ready] "Select looper, or scrape to exit."
          [:record-length] "Select one to six master cycles using scale degrees one to six."
          [:command-cancelled] "Command cancelled."
          [:engine-failure] "Audio engine failure."}
@@ -47,7 +47,7 @@
                   (if (= cycles 1) " cycle selected. Release the guitar and wait for the cue."
                       " cycles selected. Release the guitar and wait for the cue."))])
           (for [id (range 1 7)
-                [prompt tail] {:loop-selected "selected. Select action."
+                [prompt tail] {:loop-selected "selected."
                                :recording-armed "recording armed. Release the guitar and wait for the cue."
                                :recording "recording." :recorded "recorded."
                                :playing "playing." :stopped "stopped."

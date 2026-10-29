@@ -17,6 +17,7 @@ It provides:
 - one active recorder, no overdub;
 - octave-independent guitar commands based on C-major scale degrees;
 - sample-accurate recording and playback boundaries;
+- context-sensitive low-E string scrape to stop recording or playback, or exit;
 - outer-silence trimming for the first/master loop;
 - synchronized later loops with a selectable 1–6 master-cycle length and automatic finalization;
 - queued cycle-boundary playback;
@@ -65,36 +66,52 @@ Wake phrase:
 C D C D
 ```
 
-After the wake phrase, select a loop or exit:
+The low-E scrape is the context-sensitive stop/exit gesture:
 
-| Degree | Note | Action |
-| ---: | --- | --- |
-| 1–6 | C, D, E, F, G, A | Select loop 1–6 |
-| 7 | B | Exit immediately |
+| Guitar sequence | Action |
+| --- | --- |
+| Wake → degree 1–6 (C–A), then wait | Select an empty slot and begin recording setup |
+| While recording → scrape low E | Stop recording directly |
+| Wake → slot → degree 2 (D) | Start that slot's playback |
+| Wake → slot → scrape low E | Stop that slot's playback, or cancel its queued start |
+| Wake → slot → degree 3 (E) | Erase that stopped slot |
+| Wake → scrape low E | Fade out and exit immediately, discarding any active recording |
 
-After selecting a loop, choose an action:
+`Wake → slot` is a prefix of the playback and erase commands, so after the slot
+selection prompt there is a two-second action window plus 350 ms recognition
+grace. If no action arrives, an **empty, idle** slot begins recording setup; a
+slot with an existing clip never auto-records or overwrites it. Degree 1 after
+slot selection can also explicitly begin recording setup. Wait for the recording-armed prompt
+and start cue before playing the take. Notes played during spoken prompts and
+their guards are ignored; wait for the prompts before selecting a note.
+Contextual scrapes are accepted during those prompts. A scrape also cancels an
+armed recording.
 
-| Degree | Note | Action |
-| ---: | --- | --- |
-| 1 | C | Start recording |
-| 2 | D | Stop recording |
-| 3 | E | Start playback |
-| 4 | F | Stop playback |
-| 5 | G | Erase the selected stopped loop |
-| 6–7 | A, B | Reserved |
+The experimental scrape recognizer uses a fixed spectral fingerprint from one
+FX100/pickup/preset sample, not a general classifier or pitch recognition. It
+calibrates input noise over the first ~0.8 seconds; different guitars, effects,
+levels, or normal playing can cause missed or false triggers. `[d]` displays its
+current match and noise level.
 
-For the first/master clip, record as before and stop it with degree 2. Once a
-master exists, degree 1 asks for the later clip's length: play scale degree 1–6
-(C, D, E, F, G, A in any octave) to record that many full master cycles. The
-recorder starts on the next shared boundary and automatically finalizes at the
-selected boundary. Degree 2 remains available as an early stop; it keeps only
-already-completed master cycles. Choices that exceed the 120-second slot
-capacity are disabled.
+On a recognized scrape, finalization uses its estimated onset, not the later
+recognition time. The onset is an analysis-window estimate, not a guarantee of
+exact physical timing. An unrecognized scrape remains in the take. For later
+clips the stop is rounded back to the most recent completed master cycle; if no
+cycle is complete, recording continues. Verify results before relying on this
+experimental control.
+
+For the first/master clip, record freely and stop with a scrape. Once a master
+exists, recording setup asks for the later clip's length: play scale degree 1–6
+(C, D, E, F, G, A in any octave) to record that many full master cycles, or
+scrape to cancel. The recorder starts on the next shared boundary and
+finalizes automatically at the selected boundary. A scrape stops it early,
+keeping only completed master cycles. Choices exceeding 120 seconds are disabled.
 
 Erase is a direct command and is published only after the native engine
-acknowledges it. The wake phrase followed by degree 7 starts the safe exit fade
-immediately; there is no second-note confirmation or hold. Keyboard `q` uses the
-same graceful shutdown. `[d]` toggles pitch debug and `[c]` reopens input
+acknowledges it. Playback stop occurs at the next master boundary; cancelling a
+queued playback start also waits for native acknowledgement. `Wake → scrape`
+and keyboard `q` use the same safe exit fade, without additional confirmation.
+`[d]` toggles pitch debug and `[c]` reopens input
 selection when all slots are empty and idle.
 
 The first finalized clip establishes the master cycle. Its leading/trailing
@@ -162,7 +179,8 @@ jolt guitar-audio-looper.jolt --check
 It covers pure command policy, setup/dashboard behavior, runtime effect dispatch,
 sequenced native transport, every recorded stereo PCM sample, arbitrary sample
 boundaries, silence trim, six-slot mixing, capacity handling, prompt playback,
-and the native `pitchamdf` lifecycle. It opens no audio device.
+the native `pitchamdf` lifecycle, and the native scrape recognizer on a synthetic
+fixture and negative tone. It opens no audio device.
 
 Static development checks:
 
