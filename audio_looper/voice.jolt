@@ -11,13 +11,15 @@
    :finalizing "Wait for recording to finish."
    :clip-exists "A clip already exists. Erase it before recording again."
    :not-recording "That looper is not recording."
-   :recording-active "Scrape to stop recording, or wake and scrape to exit."
+   :recording-active "Play the cancel word to finish recording, or wake then cancel to exit."
    :cycle-exceeds-capacity "No complete master cycle fits within recording capacity."
    :empty "That looper is empty."
    :stop-before-erase "Stop playback before erasing the clip."
    :reserved "Invalid command. That note is reserved."
    :invalid-loop "Invalid looper selection."
    :exiting "The looper is exiting."})
+
+
 (def noop-text
   {:already-recording "Already armed or recording."
    :finalizing "Recording is already finishing."
@@ -35,13 +37,13 @@
 
 (defn phrases
   []
-  (into {[:ready] "Select looper, or scrape to exit."
+  (into {[:ready] "Select looper, or play the cancel word to exit."
          [:command-cancelled] "Command cancelled."
          [:engine-failure] "Audio engine failure."}
         (concat
           (for [id (range 1 7)
                 [prompt tail] {:loop-selected "selected."
-                               :recording-armed "recording armed. Release the guitar, wait for the cue, and scrape low E to finish."
+                               :recording-armed "recording armed. Release the guitar, wait for the cue, and play seven six seven six to finish."
                                :recording "recording." :recorded "recorded."
                                :playing "playing." :stopped "stopped."
                                :erased "erased." :maximum-reached "maximum recording length reached."

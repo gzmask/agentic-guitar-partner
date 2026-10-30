@@ -3,6 +3,8 @@
 ## Status
 
 This document is the design and verification record for the looper POC.
+The current cancel-word controls below supersede historical scrape/stop grammar
+in the older stage-design sections; README.md is the current user guide.
 
 ### Persistent sessions
 
@@ -54,93 +56,76 @@ The runtime checks cover accepted/unmatched/duplicate acknowledgements and disk
 failure propagation. PTY checks cover new/load cancellation, EOF, SIGINT/SIGTERM,
 terminal/cursor restoration and lock release after signals without opening audio.
 
-### Experimental global low-E scrape stop
+### Note-based cancel word — current controls
 
-The Csound detector in `audio_looper/scrape.jolt` compares 24 normalized
-900–5500 Hz stereo-power bands against an aggregate fingerprint derived from six
-low-E scrapes with varied speed, force, and contact position on the user's
-FX100/pickup/preset chain. No captured PCM is stored in the repository. It uses
-a 2048-sample Hann window, 441-sample hop, an approximately 0.8-second noise
-calibration, a 0.90 match threshold, spectral-shape guards and eight matching
-frames with bounded gaps. An 80-frame/121-bin rolling histogram estimates the
-20th-percentile level; after warmup only lower estimates may update the floor.
-This recovers after startup activity followed by quiet, without tracking guitar
-tails upward as background. The level gate opens at noise +6 dB (minimum
--100 dBFS), holds until 3 dB below that opening threshold, and is independent of
-the unchanged spectral confirmation. The dashboard requests muted strings during
-warmup; changed presets/gain need a fresh startup calibration. A recognized
-gesture stays latched until the spectral match has been absent for 120 ms and
-the 650 ms cooldown has elapsed. Ordinary playing may release the match; full
-input silence is not required. A detection
-emits the estimated first matching window onset through the existing sequenced
-event ring, with a native recorder ID when one is active. In recording state,
-the gesture cancels an arm or requests finalization without wake. After wake it
-exits; after selecting a slot it stops playback or cancels its queued start.
-Gestures preceding the relevant wake/selection onset are ignored. Exit takes
-precedence over an active recording and discards it. Engine acknowledgement
-remains the sole publication point.
+The active stop/exit gesture is **scale degrees 7-6-7-6**, C-major B-A-B-A,
+replacing the FX100-specific low-E scrape. Its pitches derive from the saved
+seven-degree scale, without changing the version-1 manifest or profile schema.
+Old tracks, PCM, wake phrases, master phase and fresh loaded operation IDs remain
+unchanged. The scrape module, FFT instrument/table, native event and telemetry
+are removed from the current application; no fallback acoustic trigger remains.
 
-First/master recordings use that onset (then the existing outer-silence trim).
-Later recordings stop at the last completed master boundary before the onset;
-if no complete cycle exists, recording continues. FFT windowing means onset is
-an estimate and may precede physical string contact. Failed detections remain in
-the recording, and false detections can stop it early. This six-example
-fingerprint covers the recorded variations but remains experimental and is not
-validated across guitars, tones, levels, normal playing, or hardware. `[d]`
-exposes match, level, noise, actual gate threshold/state, warmup progress, hits
-and native detection count on dedicated rows, including in the 80x24 dashboard.
-These scalar diagnostics do not acknowledge or accept commands. No new service,
-audio process, or per-block host DSP was added.
+Csound still owns `pitchamdf`, the 55 ms confirmation/120 ms release lifecycle
+and sample clock. The pure control layer matches already-confirmed note events,
+with the existing ±35-cent bound, octave-independent pitch classes, four-note
+tokens and a four-second deadline. Legato octave hops are not extra syllables.
+This removes dependence on a fixed scrape spectrum, not the possibility of
+effect-induced pitch errors. Harmonizers, pitch shifting, gating, modulation and
+delay still need hardware validation. Actual music can contain the word.
 
-Offline verification includes six generated positive fixtures based on the
-measured profiles, inverted stereo channels, a pitched negative, broadband
-noise, ring/correlation and pending-ack checks, queued-playback
-cancellation/race handling, and PCM preservation. Separately, the six real
-FX100 scrapes are re-evaluated offline from `/tmp`: the current detector still
-recognizes 6/6 once each, with no extra detections in that recording.
-Set `AUDIO_LOOPER_SIX_SCRAPES_WAV` to that original 18.7-second capture to include
-the labeled recording regression in the offline suite. It is not committed PCM
-and does not establish generalization or a real-world false-positive rate.
+Contexts preserve the old actions:
+- During recording, cancel completes the take; finalization uses the first
+  detected note onset, not the fourth note's later confirmation.
+- During an arm, cancel discards that take. The same arm/take identity survives
+  native record-start acknowledgement while the word is being played.
+- After wake, cancel exits with the existing fade, even during its ready prompt.
+  Exit retains priority over finalizing a currently active recording.
+- After selecting a slot, cancel stops its playback at a master boundary or
+  cancels its queued start. Start/cancel races still require matching native
+  acknowledgements before publishing a stopped state.
 
-`038036a` was a regression: its 180 ms/16-hit/80% gate reduced the captured
-positives to 3/6, and silence-only rearming could block commands during ordinary
-playing. Those changes are rolled back, not retuned against synthetic negatives.
-Generated tests now require a fresh scrape after a non-quiet pitched interlude
-and one event for a sustained gesture. Spectral lookalikes are not labeled
-negative solely because they are short. The earlier over-sensitivity report
-remains unresolved; future tightening needs labeled real false-trigger audio as
-well as the known positives.
+A degree-7 prefix is reserved before ordinary selector/action dispatch.
+Menu deadlines cannot auto-arm an empty slot halfway through that word. Its
+menu attempt is bounded to four seconds; a wrong/expired attempt cancels the
+command instead of forwarding a dangerous suffix. An incomplete word does not
+stop an ongoing recording. Context changes and sequence gaps reset progress;
+a word cannot cross wake/slot/take ownership boundaries. Distinct custom wakes
+remain available, including one beginning on degree 7. Prefer wake notes 1–5:
+overlapping words are ambiguous, and the reserved cancel word takes precedence
+over identical/contained custom wake patterns during recording.
 
-A subsequent 18.51-second current-FX100 capture reproduced zero detections even
-after that rollback. Near 12.3/14.6 seconds its clear scrape shapes reached 0.95,
-but the old +10 dB per-frame gate accepted zero/three frames, fewer than eight.
-Its RMS-based noise update also rose from about -63 dBFS toward -60 dBFS during
-playing. The rolling-percentile floor and +6/+3 dB hysteresis fix those measured
-failures without changing the fingerprint, score threshold or hit count.
-`AUDIO_LOOPER_CURRENT_SCRAPES_WAV` enables that recording regression, including
-native recorder-ID correlation and the real event driving host finalization at
-its onset. Both clear scrapes are detected; the normal-note opening is rejected.
-The weak 8.9-second transient is not treated as a required positive or used to
-justify weakening the spectral matcher. `AUDIO_LOOPER_SCRAPE_NOISE_WAV` enables
-the preceding 9.05-second noise-only recording, which produces zero detections.
-Generated checks cover noise recovery after startup playing, no upward learning
-of music and hysteretic envelope release. **All these checks are offline; the
-updated full live-looper flow still requires hardware validation.**
+The first/master clip retains existing native outer-silence trim. Later clips
+retain complete master cycles before the first-note estimate; before a complete
+cycle the recorder stays active. Pitch onset is an analysis estimate and may lag
+physical contact, leaving some first-note attack. An unrecognized word remains
+in PCM. Capacity finalization takes precedence over an unconfirmed word; already
+acknowledged clips are not retrospectively changed. Real stereo samples, bounded
+mailboxes, matching operation IDs, ack-only persistence, erase semantics,
+playback makeup gain, Ctrl+C/terminal cleanup and the 600-second OS alarm remain.
 
-The compact command grammar is wake → slot → wait for default recording,
-wake → slot → 2 for playback, wake → slot → 3 for erase, wake → slot → scrape
-to stop playback, and wake → scrape to exit. The selector is a shared prefix:
-empty slots arm recording after a two-second action window plus 350 ms recognition
-grace. Both master and non-master recordings then continue until a low-E scrape;
-non-master length is the number of complete master cycles before that scrape.
-Existing clips are never overwritten. Scrape commands are accepted while
-the relevant voice prompt is playing; note actions still wait for prompt guards.
-Playback cancellation uses a correlated native operation; if the start raced it,
-the host queues a boundary stop instead of claiming an immediate stop. Earlier
-design sections below are historical where they describe the old note grammar.
+The dashboard permanently displays the cancel notes and 0..4 progress, including
+the 80x24 view with six selectors and the keyboard/events footer. Debug retains
+native pitch, gate/level and confirmed-note history instead of scrape scores.
+Runtime speech and setup help use the same cancel-word grammar.
 
-Implementation covers **stages 0–6**, passes the complete offline suite, and has
-completed multiple real FX100/guitar validation passes. Those passes validated
+Offline checks cover wrong/partial/expired words, mixed octaves/legato hops,
+stale events, context/gap resets, prompt handling, deadline reservations,
+armed/start transitions, stop/cancel races, direct erase and first-onset master
+cycle rounding. Generated clean, harmonic-rich and clipped-tone B/A phrases pass
+through the actual native pitch/event transport, request host finalization and
+publish only on the matching native ack; every captured stereo sample is checked.
+Held/wrong sequences do not cancel. These tests do not establish performance on
+the user's newly selected preset; no live audio was opened for this change.
+
+Historical note: the prior scrape recognizer was calibrated on six examples
+from one FX100 tone. Its 6/6 recorded regression, rearming rollback and weak-level
+gate repair did not establish cross-preset generalization. The former
+`AUDIO_LOOPER_*SCRAPES*_WAV`/scrape-noise checks are no longer active gates.
+The old implementation and detailed calibration history remain in git history.
+
+Implementation covers **stages 0–6** and passes the complete offline suite.
+Earlier controls completed multiple real FX100/guitar validation passes, but
+those passes do not validate the new cancel word. Those passes validated
 end-to-end PCM recording/playback and drove octave-independent commands,
 master-loop silence trimming, direct erase, TUI clarification, and mix-gain
 refinements. Entrypoints:

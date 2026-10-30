@@ -1,7 +1,7 @@
 (ns audio-looper.dsp
   "Csound owns PCM, analysis and sample clocks; no guitar-command grammar here."
-  (:require [audio-looper.scrape :as scrape]
-            [clojure.string :as str]))
+  (:require
+    [clojure.string :as str]))
 
 
 (def ring-size 128)
@@ -9,10 +9,11 @@
 (def operation-codes {:record-start 1 :record-finalize 2 :record-cancel 3
                       :playback-start 4 :playback-stop 5 :buffer-erase 6
                       :prompt 7 :prompt-cancel 8 :fade-mixer 9 :playback-cancel 10})
-(def event-types {1 :note-on 2 :note-off 3 :record-started 4 :record-finalized
-                  5 :record-cancelled 6 :playback-started 7 :playback-stopped
-                  8 :buffer-erased 9 :prompt-finished 10 :record-limit 11 :mixer-faded
-                  12 :scrape 13 :playback-cancelled})
+(def event-types
+  {1 :note-on 2 :note-off 3 :record-started 4 :record-finalized
+   5 :record-cancelled 6 :playback-started 7 :playback-stopped
+   8 :buffer-erased 9 :prompt-finished 10 :record-limit 11 :mixer-faded
+   13 :playback-cancelled})
 
 
 (defn quote-path
@@ -497,11 +498,11 @@ endin")
     :or {capacity 5292000 duration 600 input-channels 2 monitor? false detect? true
          gate -44 trim-gate -50}}]
   (when-not (and (integer? capacity) (<= 1 capacity 5292000) (<= 0.01 duration 600)
-                (<= -90 gate -6) (<= -90 trim-gate -6) (or input (and live? input-device output-device))
-                (or input (empty? operations))
-                (<= (count clips) 6) (= (count clips) (count (set (map :id clips))))
-                (every? #(and (integer? (:id %)) (<= 1 (:id %) 6)
-                              (integer? (:length-samples %)) (<= 1 (:length-samples %) capacity)) clips))
+                 (<= -90 gate -6) (<= -90 trim-gate -6) (or input (and live? input-device output-device))
+                 (or input (empty? operations))
+                 (<= (count clips) 6) (= (count clips) (count (set (map :id clips))))
+                 (every? #(and (integer? (:id %)) (<= 1 (:id %) 6)
+                               (integer? (:length-samples %)) (<= 1 (:length-samples %) capacity)) clips))
     (throw (ex-info "Invalid DSP configuration or live fixture injection." {})))
   (let [prompts (vec prompts)
         source (if input (str "gaInL, gaInR diskin2 " (quote-path input) ", 1, 0, 0")
@@ -510,9 +511,7 @@ endin")
                          ["chn_k \"e/ack\", 1\n"]
                          (map #(str "chn_k \"" % "\", 2\n")
                               ["h/ack" "e/write" "engine/clock" "engine/fatal" "engine/peak"
-                               "pitch/hz" "pitch/db" "pitch/midi" "pitch/cents" "pitch/gate"
-                               "scrape/score" "scrape/db" "scrape/noise" "scrape/threshold"
-                               "scrape/gate" "scrape/calibration" "scrape/hits" "scrape/detections"])
+                               "pitch/hz" "pitch/db" "pitch/midi" "pitch/cents" "pitch/gate"])
                          (for [i (range 6)] (str "chn_k \"slot/" i "/length\", 2\n"))
                          (for [i (range ring-size) field (conj fields "seq")]
                            (str "chn_k \"ev/" i "/" field "\", 2\n")))
@@ -525,8 +524,8 @@ endin")
                    (map-indexed #(str "giP" %1 " ftgen " (+ 1000 %1) ", 0, -" (:frames %2) ", -2, 0\n") prompts)
                    ["giSilence ftgen 1000, 0, -1, -2, 0\n"]))
         trace (when trace? (str "tablew gkClock, (gkClock/ksmps)*3, 300\n"
-                               "tablew khz, (gkClock/ksmps)*3+1, 300\n"
-                               "tablew kdb, (gkClock/ksmps)*3+2, 300"))
+                                "tablew khz, (gkClock/ksmps)*3+1, 300\n"
+                                "tablew kdb, (gkClock/ksmps)*3+2, 300"))
         publish (str/join "\n" (map-indexed
                                  (fn [i field]
                                    (str "S" i " sprintfk \"ev/%d/" field "\", kslot\n"
@@ -534,7 +533,7 @@ endin")
         body (reduce-kv str/replace orchestra
                         {"__CAP__" (str capacity) "__PROMPT_COUNT__" (str (count prompts))
                          "__LENGTHS__" (str/join "," (let [lengths (into {} (map (juxt :id :length-samples) clips))]
-                                                      (map #(get lengths % 0) (range 1 7))))
+                                                       (map #(get lengths % 0) (range 1 7))))
                          "__TRIM_LEVEL__" (str (Math/pow 10.0 (/ trim-gate 20.0)))
                          "__SOURCE__" source "__DETECT__" (if detect? "1" "0") "__GATE__" (str gate)
                          "__MONITOR__" (if monitor? "1" "0") "__TRACE__" (or trace "") "__PUBLISH__" publish})]
@@ -543,15 +542,14 @@ endin")
              (str "-+rtaudio=coreaudio -i" input-device " -o" output-device))
          "\n</CsOptions>\n<CsInstruments>\nsr=44100\nksmps=32\nnchnls=2\nnchnls_i=" input-channels "\n0dbfs=1\n"
          (apply str channels) (apply str tables)
-         "giScrapeTemplate ftgen 800, 0, -24, -2, " (str/join "," scrape/template) "\n"
          "giPromptLengths[] fillarray " (str/join "," (if (seq prompts) (map :frames prompts) [1])) "\n"
          (when trace? (str "giTrace ftgen 300, 0, -" (* 3 (inc (long (Math/ceil (/ (* duration 44100) 32))))) ", -2, 0\n"))
-         body "\n" scrape/orchestra "\n</CsInstruments>\n<CsScore>\n"
-         (apply str (for [instrument [1 2 10 11 30 90]] (str "i " instrument " 0 " duration "\n")))
+         body "\n</CsInstruments>\n<CsScore>\n"
+         (apply str (for [instrument [1 2 10 30 90]] (str "i " instrument " 0 " duration "\n")))
          (apply str (for [i (range 6)] (str "i 20." (inc i) " 0 " duration " " i "\n")))
          (apply str (map-indexed (fn [index op]
-                                  (str "i 99 " (/ (:sample op) 44100.0) " 0.001 "
-                                       (str/join " " [(get operation-codes (:type op)) (or (:id op) (inc index))
+                                   (str "i 99 " (/ (:sample op) 44100.0) " 0.001 "
+                                        (str/join " " [(get operation-codes (:type op)) (or (:id op) (inc index))
                                                        (dec (or (:loop-id op) 1)) (or (:at-sample op) 0)
                                                        (or (:length-samples op) 0) (or (:arg op) 0)
                                                        (or (:seq op) (inc index))]) "\n")) operations))

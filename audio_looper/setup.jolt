@@ -178,34 +178,37 @@
          header (if live-capture?
                   "AUDIO LOOPER SETUP (--live; input capture with monitoring off)"
                   "AUDIO LOOPER SETUP (no audio stream opened by this UI)")]
-    (vec (concat
-           [header output]
-           (case (:stage state)
-             :input (concat ["Input device:"]
-                            (map-indexed #(str (inc %1) ". " (:name %2) " [" (:channels %2) " channels]")
-                                         (get-in state [:inventory :inputs]))
-                            ["> Enter the list number (q quits)."])
-             :headphones ["Microphone/unknown input: raw monitoring is OFF."
-                          "Use headphones to prevent acoustic feedback. Headphones connected? [y/N]"]
-             :profile ["Control setup:" "1. C major; wake = C5 D5 C5 D5 [default]"
-                       (if live-capture? "2. Capture custom scale and wake with the guitar"
-                           "2. Custom scale/wake capture requires --live")
-                       (if live-capture? "3. C major; capture a custom wake with the guitar"
-                           "3. Custom C-major wake capture requires --live")
-                       (if live-capture?
-                         "> Enter/1 or play C/D/E in the default scale for options 1/2/3"
-                         "> [Enter] or 1 selects C major")]
-             :profile-release [(str "Release the note for option " (:profile-choice state) ".")
-                               "Then wait for one second of silence."]
-             :scale [(str "Play ascending scale + octave (8 notes): " (:scale state))
+     (vec (concat
+            [header output]
+            (case (:stage state)
+              :input (concat ["Input device:"]
+                             (map-indexed #(str (inc %1) ". " (:name %2) " [" (:channels %2) " channels]")
+                                          (get-in state [:inventory :inputs]))
+                             ["> Enter the list number (q quits)."])
+              :headphones ["Microphone/unknown input: raw monitoring is OFF."
+                           "Use headphones to prevent acoustic feedback. Headphones connected? [y/N]"]
+              :profile ["Control setup:" "Cancel = 7-6-7-6 in the chosen scale (C major: B A B A; any octave)."
+                        "1. C major; wake = C5 D5 C5 D5 [default]"
+                        (if live-capture? "2. Capture custom scale and wake with the guitar"
+                            "2. Custom scale/wake capture requires --live")
+                        (if live-capture? "3. C major; capture a custom wake with the guitar"
+                            "3. Custom C-major wake capture requires --live")
+                        (if live-capture?
+                          "> Enter/1 or play C/D/E in the default scale for options 1/2/3"
+                          "> [Enter] or 1 selects C major")]
+              :profile-release [(str "Release the note for option " (:profile-choice state) ".")
+                                "Then wait for one second of silence."]
+              :scale [(str "Play ascending scale + octave (8 notes): " (:scale state))
+                      capture-help]
+              :wake [(str "Play a 3..6-note wake, then one second of silence: " (:wake state))
                      capture-help]
-             :wake [(str "Play a 3..6-note wake, then one second of silence: " (:wake state))
-                    capture-help]
-             :review [(str "Wake pitches: " (get-in state [:profile :wake :midi]))
-                      (str "Degrees: " (get-in state [:profile :wake :degrees]))
-                      "Enter accepts; r captures again; q quits."]
-             :ready ["Setup ready."] :quit ["Cancelled."] :error ["No safe device selection available."] [])
-           (when message [message]))))))
+              :review [(str "Wake pitches: " (get-in state [:profile :wake :midi]))
+                       (str "Degrees: " (get-in state [:profile :wake :degrees]))
+                       (str "Cancel degrees: " control/cancel-degrees "; pitches: "
+                            (control/cancel-pattern (:profile state)) " (any octave).")
+                       "Enter accepts; r captures again; q quits."]
+              :ready ["Setup ready."] :quit ["Cancelled."] :error ["No safe device selection available."] [])
+            (when message [message]))))))
 
 
 (defn resolve-session

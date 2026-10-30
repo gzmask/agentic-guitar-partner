@@ -1,15 +1,14 @@
 (ns audio-looper.engine-checks
-  "Finite offline production-DSP checks using generated PCM and an optional,
-  explicitly selected original FX100 recording. Never opens an audio device."
-  (:require [audio-looper.control :as control]
-            [audio-looper.csound :as native]
-            [audio-looper.engine :as engine]
-            [audio-looper.notes :as notes]
-            [audio-looper.scrape :as scrape]
-            [audio-looper.voice :as voice]
-            [audio-looper.wav :as wav]
-            [clojure.java.io :as io]
-            [clojure.string :as str]))
+  "Finite offline production-DSP and confirmed-note command checks. No audio device."
+  (:require
+    [audio-looper.control :as control]
+    [audio-looper.csound :as native]
+    [audio-looper.engine :as engine]
+    [audio-looper.notes :as notes]
+    [audio-looper.voice :as voice]
+    [audio-looper.wav :as wav]
+    [clojure.java.io :as io]
+    [clojure.string :as str]))
 
 
 (defn- verify!
@@ -42,7 +41,7 @@
             lengths (mapv #(long (native/control (:instance running) (str "slot/" % "/length"))) (range 6))
             peak (native/control (:instance running) "engine/peak")]
         (engine/close! running)
-        {:events (:events snapshot) :scrape (:scrape snapshot) :tables data :lengths lengths :peak peak
+        {:events (:events snapshot) :tables data :lengths lengths :peak peak
          :wave (when (:output configuration) (wav/read! (:output configuration)))})
       (finally (engine/close! running)))))
 
@@ -284,227 +283,68 @@
     (println "PASS queued playback cancellation, start race and operation correlation")))
 
 
-(def ^:private scrape-edges
-  [42 47 51 56 61 67 72 78 85 91 99 106 114 123 132 141 151 162 173 185 198 211 225 240 256])
+(defn- follow-cancel-notes
+  [events]
+  (loop [state (-> (control/initial-state)
+                   (assoc :active-recorder 1 :effect-seq 7)
+                   (assoc-in [:slots 0 :record-state] :armed)
+                   (assoc-in [:slots 0 :record-arm-sample] 0)
+                   (assoc-in [:slots 0 :pending] {:type :record-start :id 7 :at-sample 64}))
+         effects [] remaining events]
+    (if-let [event (first remaining)]
+      (let [[state emitted] (control/step state event)
+            effects (into effects emitted)]
+        (if (some #(= :record-finalize (:type %)) emitted)
+          [state effects]
+          (recur state effects (rest remaining))))
+      [state effects])))
 
 
-(def ^:private scrape-training-profiles
-  [[0.185253167184 0.200821542724 0.156959876949 0.132331137222
-    0.148099032842 0.215137846665 0.246058444516 0.340098933988
-    0.446482545680 0.250779214161 0.255769452367 0.096866655065
-    0.073562245643 0.095720828119 0.087905585145 0.090063584194
-    0.139345558486 0.225646918732 0.433234084986 0.059868059079
-    0.057137028447 0.049983878927 0.054274652016 0.031704550879]
-   [0.119191177319 0.153718506325 0.083605515185 0.107136994225
-    0.151316285181 0.197550904396 0.288298842348 0.294161937656
-    0.325157880391 0.294837306417 0.297337635063 0.147492935818
-    0.083345993598 0.106725630313 0.094560405072 0.093394078679
-    0.140345191877 0.277643405111 0.493134262088 0.104671902169
-    0.091710123674 0.079352295413 0.082096162915 0.030599137373]
-   [0.078599534168 0.065034255140 0.047646788328 0.047097441451
-    0.066339798518 0.154874310318 0.244627124859 0.230692942213
-    0.411851954975 0.288434528596 0.341891088130 0.070193863306
-    0.118730204339 0.116012376179 0.067325577094 0.072926204787
-    0.132058276152 0.303677812365 0.542190626757 0.087722172969
-    0.076103175154 0.074746237772 0.087940811062 0.034321270345]
-   [0.059209753371 0.075558677959 0.066012951930 0.042542167094
-    0.095018171655 0.150695450901 0.168558083822 0.215238782012
-    0.469211491412 0.268695783929 0.375126926711 0.192996753576
-    0.126218635741 0.184459802082 0.167012357197 0.117613914108
-    0.172604358651 0.293339749083 0.416861517745 0.094193252757
-    0.073701484970 0.061628462119 0.088616412720 0.023741781210]
-   [0.134398433253 0.133503441983 0.087458999768 0.061181242158
-    0.136551276013 0.136768753972 0.215694203122 0.206423443088
-    0.475204593093 0.203265908914 0.274144304796 0.074403004508
-    0.080796899585 0.168677979895 0.042649053050 0.055590909088
-    0.108794567731 0.249617781856 0.592979087922 0.069961589083
-    0.062359466474 0.036663399498 0.046199280031 0.022060578955]
-   [0.088217087982 0.085439722807 0.060649391341 0.106426839893
-    0.121923326678 0.246074398601 0.217185528784 0.312556367433
-    0.325381205681 0.363624458924 0.253867641911 0.100284156188
-    0.053488659171 0.076312117761 0.051257327420 0.050088577669
-    0.094401587760 0.284159205753 0.543903205255 0.099922455772
-    0.094558085809 0.104039465585 0.082047714802 0.035229731691]])
-
-
-(defn- scrape-expression
-  [profile]
-  (str/join "+"
-            (mapcat (fn [group]
-                      (for [bin (range (nth scrape-edges group) (nth scrape-edges (inc group)))]
-                        (format "%.12f*sin(2*PI*%.9f*t+%.5f)"
-                                (* 0.006 (nth profile group))
-                                (* (+ bin 0.21) (/ 44100.0 2048))
-                                (* 0.1 (mod (* bin 739) 63)))))
-                    (range 24))))
-
-
-(defn- check-scrape!
+(defn- check-cancel-pitch!
   [owner]
-  (let [template-wave (scrape-expression scrape/template)
-        wave (str "if(between(t,1.5,1.9)," template-wave
-                  ",if(between(t,1,1.3),0.1*sin(2*PI*220*t),0))")
-        fixture (generate! owner "scrape-synth.wav" (str wave "|-1*(" wave ")") 3)
-        started {:type :record-start :sample 0 :at-sample 64 :id 7}
-        opts {:input fixture :capacity 132300 :duration 3 :detect? false}
-        no-record (perform! opts [])
-        varied-wave (str/join "+"
-                              (map-indexed
-                                (fn [index profile]
-                                  (let [start (+ 1.5 index)]
-                                    (str "if(between(t," start "," (+ start 0.3) "),("
-                                         (scrape-expression profile) "),0)")))
-                                scrape-training-profiles))
-        varied (generate! owner "scrape-six.wav" (str varied-wave "|-1*(" varied-wave ")") 8)
-        varied-result (perform! (assoc opts :input varied :duration 8) [])
-        varied-matches (filter #(= :scrape (:type %)) (:events varied-result))
-        recording (perform! (assoc opts :operations [started]) [])
-        matches (filter #(= :scrape (:type %)) (:events recording))
-        event (first matches)
-        length (when event (- (:onset-sample event) 64))
-        complete (when length
-                   (perform! (assoc opts :operations [started {:type :record-finalize :sample 90000
-                                                                :length-samples length :id 8}])
-                             [[100 (- 44100 64) 128]]))
-        source (wav/read! fixture)
-        tone (generate! owner "scrape-negative.wav" "0.3*sin(2*PI*110*t)|0.3*sin(2*PI*110*t)" 3)
-        negative (perform! (assoc opts :input tone :operations [started]) [])
-        noise (.getPath (io/file (:directory @owner) "scrape-noise.wav"))
-        _ (voice/run-child! owner 15000 ["ffmpeg" "-v" "error" "-y" "-f" "lavfi" "-i"
-                                        "anoisesrc=color=white:amplitude=0.05:sample_rate=44100:duration=3:seed=42"
-                                        "-ac" "2" "-c:a" "pcm_f32le" noise])
-        noise-result (perform! (assoc opts :input noise :operations [started]) [])]
-    (verify! "scrape is published globally without a recorder"
-             (let [event (first (filter #(= :scrape (:type %)) (:events no-record)))]
-               (and event (= 0 (:loop-id event)) (= 0 (:operation-id event)))))
-    (verify! "six measured scrape profiles each produce one recognized gesture"
-             (and (= 6 (count varied-matches))
-                  (= [1 2 3 4 5 6]
-                     (mapv #(long (/ (:onset-sample %) 44100)) varied-matches))))
-    (verify! "Csound detects one phase-inverted stereo scrape with recorder correlation"
-             (and (= 1 (count matches)) (= 1 (:loop-id event)) (= 7 (:operation-id event))
-                  (<= 64000 (:onset-sample event) 67000) (< (:onset-sample event) (:sample event))))
-    (verify! "native finalization cuts before scrape without altering recorded PCM"
-             (and (= length (first (:lengths complete)))
-                  (some #(= :record-finalized (:type %)) (:events complete))
-                  (every? true? (map-indexed (fn [i value] (near? value (wav/sample source (+ 44100 i) 0)))
-                                              (first (:tables complete))))))
-    (verify! "stationary pitched tone and broadband noise do not trigger scrape"
-             (and (not-any? #(= :scrape (:type %)) (:events negative))
-                  (not-any? #(= :scrape (:type %)) (:events noise-result))))
-    (println "PASS six-profile Csound scrape recognition, stereo power, correlation and negatives")))
-
-
-(defn- check-scrape-rearm!
-  [owner]
-  (let [sound (scrape-expression scrape/template)
-        wave (str "if(between(t,1.5,1.9)+between(t,2.6,3.0)+between(t,3.8,4.2),("
-                  sound "),if(between(t,1.9,2.6),0.1*sin(2*PI*220*t),0))")
-        input (generate! owner "scrape-playing-between-commands.wav" (str wave "|" wave) 5)
-        result (perform! {:input input :duration 5 :capacity 1 :detect? false} [])
-        matches (filter #(= :scrape (:type %)) (:events result))]
-    (verify! "fresh scrapes work after ordinary playing without requiring input silence"
-             (= [1 2 3] (mapv #(quot (:onset-sample %) 44100) matches)))
-    (let [held-wave (str "if(between(t,1.5,3.5),(" sound "),0)")
-          held (generate! owner "scrape-held.wav" (str held-wave "|" held-wave) 4)
-          result (perform! {:input held :duration 4 :capacity 1 :detect? false} [])]
-      (verify! "one sustained gesture stays latched instead of repeatedly triggering"
-               (= 1 (count (filter #(= :scrape (:type %)) (:events result))))))
-    (println "PASS fresh scrapes after ordinary playing and sustained-gesture deduplication")))
-
-
-(defn- check-recorded-scrapes!
-  "Optional regression against the original six-scrape FX100 capture. The raw
-  PCM stays outside git; setting the variable explicitly opts into reading it."
-  []
-  (when-let [input (System/getenv "AUDIO_LOOPER_SIX_SCRAPES_WAV")]
-    (let [wave (wav/read! input)
-          duration (/ (:frames wave) 44100.0)
-          _ (verify! "original six-scrape fixture is stereo 44.1 kHz and 18..20 seconds"
-                     (and (= 44100 (:rate wave)) (= 2 (:channels wave)) (<= 18 duration 20)))
-          result (perform! {:input input :duration duration :capacity 1 :detect? false} [])
-          matches (vec (filter #(= :scrape (:type %)) (:events result)))
-          windows [[2.75 3.20] [5.65 6.20] [8.25 8.90] [11.20 11.85] [14.05 14.60] [16.35 17.00]]]
-      (verify! "each original FX100 scrape is recognized once with no extra detections"
-               (and (= 6 (count matches))
-                    (every? true? (map (fn [event [start end]]
-                                        (<= (* start 44100) (:onset-sample event) (* end 44100)))
-                                      matches windows))))
-      (println "PASS original six-scrape FX100 recording: 6/6, no extra detections"))))
-
-
-(defn- check-scrape-level-gate!
-  [owner]
-  (let [sound (scrape-expression scrape/template)
-        wave (str "if(lt(t,1.1),0.1*sin(2*PI*220*t),"
-                  "if(between(t,1.6,2.0),0.01*(" sound "),0))")
-        input (generate! owner "scrape-calibration-recovery.wav" (str wave "|" wave) 3)
-        result (perform! {:input input :duration 3 :capacity 1 :detect? false} [])]
-    (verify! "a quiet interval recovers noise calibration after startup guitar activity"
-             (= 1 (count (filter #(= :scrape (:type %)) (:events result))))))
-  (let [wave "if(lt(t,1),0.0002,0.00035)*sin(2*PI*220*t)"
-        input (generate! owner "scrape-noise-not-music.wav" (str wave "|" wave) 3)
-        options {:input input :duration 0.95 :capacity 1 :detect? false}
-        baseline (get-in (perform! options []) [:scrape :noise])
-        after-playing (get-in (perform! (assoc options :duration 3) []) [:scrape :noise])]
-    (verify! "ordinary playing cannot raise the learned noise floor"
-             (<= after-playing (+ baseline 1.0))))
-  (let [wave "if(lt(t,0.8),0.0002,if(lt(t,1.1),0.0006,if(lt(t,1.6),0.0003,0.0001)))*sin(2*PI*220*t)"
-        input (generate! owner "scrape-level-hysteresis.wav" (str wave "|" wave) 2)
-        options {:input input :duration 1.4 :capacity 1 :detect? false}
-        held (:scrape (perform! options []))
-        released (:scrape (perform! (assoc options :duration 1.9) []))]
-    (verify! "an open level gate holds through modest envelope dips"
-             (and (:gate? held) (< (:db held) (:threshold held))
-                  (>= (:db held) (- (:threshold held) 3))))
-    (verify! "the level gate closes after a real envelope release" (false? (:gate? released))))
-  (println "PASS scrape noise recovery, music-resistant floor and level hysteresis"))
-
-
-(defn- check-current-scrape-recording!
-  "Opt-in regression for the 18.51-second live-failure capture: two clear
-  late scrapes and known normal notes at the beginning. The weak 8.9s transient
-  is deliberately not promoted to a required command by weakening the matcher."
-  []
-  (when-let [input (System/getenv "AUDIO_LOOPER_CURRENT_SCRAPES_WAV")]
-    (let [wave (wav/read! input)
-          duration (/ (:frames wave) 44100.0)
-          _ (verify! "current diagnostic fixture is stereo 44.1 kHz and 18..20 seconds"
-                     (and (= 44100 (:rate wave)) (= 2 (:channels wave)) (<= 18 duration 20)))
-          record-start (* 11 44100)
-          result (perform! {:input input :duration duration :capacity (* 8 44100) :detect? false
-                            :operations [{:type :record-start :sample (- record-start 64)
-                                          :at-sample record-start :id 7}]} [])
-          matches (filter #(= :scrape (:type %)) (:events result))
-          in-window? (fn [event [start end]]
-                       (<= (* start 44100) (:onset-sample event) (* end 44100)))]
-      (doseq [window [[12.15 12.55] [14.40 14.90]]]
-        (verify! "a clear current FX100 scrape crosses the level gate exactly once"
-                 (= 1 (count (filter #(in-window? % window) matches)))))
-      (verify! "current ordinary-note passage does not become a scrape"
-               (not-any? #(in-window? % [0 4.5]) matches))
-      (let [event (first (filter #(in-window? % [12.15 12.55]) matches))
-            state (-> (control/initial-state)
-                      (assoc :sample record-start :event-seq (dec (:seq event)) :active-recorder 1)
-                      (assoc-in [:slots 0 :record-state] :recording)
-                      (assoc-in [:slots 0 :record-start-id] 7)
-                      (assoc-in [:slots 0 :start-sample] record-start))
-            [stopping effects] (control/step state event)]
-        (verify! "the real weak-scrape event stops the correlated active recorder"
-                 (and (= 1 (:loop-id event)) (= 7 (:operation-id event))
-                      (= :record-finalize (:type (first effects)))
-                      (= (:onset-sample event) (get-in stopping [:slots 0 :pending :boundary-sample]))
-                      (= :empty (get-in stopping [:slots 0 :clip-state])))))
-      (println "PASS current FX100 capture: clear scrapes stop the correlated recorder; normal notes rejected")))
-  (when-let [input (System/getenv "AUDIO_LOOPER_SCRAPE_NOISE_WAV")]
-    (let [wave (wav/read! input)
-          duration (/ (:frames wave) 44100.0)
-          _ (verify! "noise-only fixture is bounded stereo 44.1 kHz"
-                     (and (= 44100 (:rate wave)) (= 2 (:channels wave)) (<= 1 duration 30)))
-          result (perform! {:input input :duration duration :capacity 1 :detect? false} [])]
-      (verify! "current FX100 noise-only capture does not trigger"
-               (not-any? #(= :scrape (:type %)) (:events result)))
-      (println "PASS current FX100 noise-only recording: no detections"))))
+  (let [word (str "if(between(t,1.2,1.5)+between(t,2.2,2.5),sin(2*PI*246.941651*t),"
+                  "if(between(t,1.7,2.0)+between(t,2.7,3.0),sin(2*PI*220*t),"
+                  "if(between(t,0.3,0.6),sin(2*PI*261.625565*t),0)))")
+        prefix [{:type :record-start :sample 0 :at-sample 64 :id 7}]]
+    (doseq [[name expression] [["clean" (str "0.2*(" word ")")]
+                               ["harmonics" (str "0.15*(" word ")+0.05*pow(" word ",3)")]
+                               ["clipped" (str "0.2*tanh(5*(" word "))")]]]
+      (let [input (generate! owner (str "cancel-" name ".wav") (str expression "|0.7*(" expression ")") 3.5)
+            options {:input input :capacity 154350 :duration 3.5 :operations prefix}
+            result (perform! options [])
+            [state effects] (follow-cancel-notes (:events result))
+            finalize (first (filter #(= :record-finalize (:type %)) effects))
+            pending (get-in state [:slots 0 :pending])
+            first-b (first (filter #(and (= :note-on (:type %)) (= 11 (mod (:midi %) 12))) (:events result)))]
+        (verify! (str name ": actual pitchamdf notes recognize 7-6-7-6")
+                 (and finalize first-b (= :finalizing (get-in state [:slots 0 :record-state]))))
+        (verify! "native cancel word cuts at its first note estimate, not its final confirmation"
+                 (and (= (:onset-sample first-b) (:boundary-sample pending))
+                      (< (:boundary-sample pending) (* 1.5 44100))
+                      (> (:sample state) (* 2.7 44100))))
+        (verify! "no raw PCM is published by recognizing notes alone"
+                 (= :empty (get-in state [:slots 0 :clip-state])))
+        (let [request (assoc finalize :sample (+ (:sample state) 1024))
+              complete (perform! (assoc options :operations (conj prefix request))
+                                 [[100 0 (:length-samples pending)] [101 0 (:length-samples pending)]])
+              event (first (filter #(= :record-finalized (:type %)) (:events complete)))
+              [ready _] (control/step state event)
+              source (wav/read! input)]
+          (verify! "matching native acknowledgement publishes the finalized clip"
+                   (and (= (:id finalize) (:operation-id event))
+                        (= :ready (get-in ready [:slots 0 :clip-state]))))
+          (doseq [channel (range 2) frame (range (:length-samples pending))]
+            (verify! "note commands never synthesize or change any captured stereo sample"
+                     (== (wav/sample source (+ 64 frame) channel) (get-in complete [:tables channel frame])))))))
+    (doseq [[name expression] [["held" "if(between(t,1,3),0.2*sin(2*PI*246.941651*t),0)"]
+                               ["wrong" (str/replace word "sin(2*PI*246.941651*t)" "sin(2*PI*261.625565*t)")]]]
+      (let [input (generate! owner (str "cancel-negative-" name ".wav") (str expression "|" expression) 3.5)
+            result (perform! {:input input :capacity 154350 :duration 3.5 :operations prefix} [])
+            [state effects] (follow-cancel-notes (:events result))]
+        (verify! (str name " never becomes a cancel word")
+                 (and (= :recording (get-in state [:slots 0 :record-state]))
+                      (not-any? #(= :record-finalize (:type %)) effects)))))
+    (println "PASS actual AMDF cancel word: clean/harmonic/clipped fixtures, first-note trim, native ack and unchanged stereo PCM")))
 
 
 (defn- check-assets!
@@ -537,9 +377,5 @@
       (check-voice! owner)
       (check-detector! owner)
       (check-playback-cancel! owner)
-      (check-scrape! owner)
-      (check-recorded-scrapes!)
-      (check-current-scrape-recording!)
-      (check-scrape-rearm! owner)
-      (check-scrape-level-gate! owner)
+      (check-cancel-pitch! owner)
       (finally (voice/close! owner)))))

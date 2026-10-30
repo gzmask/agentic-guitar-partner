@@ -46,9 +46,13 @@ or a generic benchmark framework unless explicitly requested. There are no
   offer C major/default wake (Enter), custom wake on C major, or custom scale/wake
   in explicit `--live` mode; C/D/E select profile options 1/2/3. Loaded sessions
   retain their saved control profile without guitar recapture.
-- Erase is a direct selected-slot command. Scrape low E to stop recording,
-  stop selected-slot playback after wake and selection, or exit after wake. Exit
-  starts the graceful fade immediately, with no extra confirmation or hold.
+- Erase is a direct selected-slot command. Cancel word = scale degrees 7-6-7-6
+  (C major B-A-B-A), octave-independent, via confirmed note events only; no
+  scrape classifier. It finishes recording at the first detected word onset,
+  cancels an arm, stops selected-slot playback, or exits after wake. Partial
+  words cannot auto-arm a menu slot or cross take/selection contexts. Exit uses
+  the existing fade without an additional confirmation. Saved profiles derive
+  cancel pitches from their scale without a session schema change.
 - The first/master clip may trim outer silence with documented preroll/tail.
   Later synchronized clips must preserve complete master-cycle phase.
 

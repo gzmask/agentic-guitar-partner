@@ -97,11 +97,10 @@
     (when-not type (throw (ex-info "Unknown native event type." {:type :engine-error :stage :protocol})))
     (case type
       :note-on (merge base {:id id :midi (long a) :onset-sample (long b) :cents c :hz d :db e
-                           :onset-time (/ b 44100.0) :confirm-time (/ sample 44100.0)})
+                            :onset-time (/ b 44100.0) :confirm-time (/ sample 44100.0)})
       :note-off (merge base {:id id :end-sample (long a) :reason (if (== b 1) :silence :pitch-change)})
       :prompt-finished (assoc base :id id)
       :record-limit (assoc base :loop-id slot :operation-id id :length-samples (long a))
-      :scrape (assoc base :loop-id slot :operation-id id :onset-sample (long a) :score b)
       :playback-cancelled (assoc base :loop-id slot :operation-id id
                                  :cancelled? (cond (== a 1) true (== a 0) false :else nil))
       :mixer-faded (assoc base :operation-id id)
@@ -168,12 +167,4 @@
          :ended? (native/finished? instance)
          :pitch {:hz hz :db (native/control instance "pitch/db")
                  :midi (when (<= 70 hz 1400) (long (native/control instance "pitch/midi")))
-                 :cents (native/control instance "pitch/cents") :gate? (pos? (native/control instance "pitch/gate"))}
-         :scrape {:score (native/control instance "scrape/score")
-                  :db (native/control instance "scrape/db")
-                  :noise (native/control instance "scrape/noise")
-                  :threshold (native/control instance "scrape/threshold")
-                  :gate? (pos? (native/control instance "scrape/gate"))
-                  :calibration (long (native/control instance "scrape/calibration"))
-                  :hits (long (native/control instance "scrape/hits"))
-                  :detections (long (native/control instance "scrape/detections"))}}))))
+                 :cents (native/control instance "pitch/cents") :gate? (pos? (native/control instance "pitch/gate"))}}))))

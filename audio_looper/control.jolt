@@ -12,6 +12,13 @@
 (def action-window 88200)
 (def action-confirmation-grace 15435)
 (def exit-ramp 1323)
+(def cancel-degrees [7 6 7 6])
+
+
+(defn cancel-pattern
+  "The stop/exit word follows the saved scale, without changing its schema."
+  [configuration]
+  (mapv #(nth (:selectors configuration) (dec %)) cancel-degrees))
 
 
 (defn- exact-integer?
@@ -78,7 +85,7 @@
    {:profile configuration :sample 0 :event-seq 0 :effect-seq 0 :last-note-id 0
     :slots (mapv empty-slot (range 1 7)) :master nil :active-recorder nil
     :parser {:phase :dormant :tokens []} :voice nil :notifications []
-    :held nil :note-history [] :log [] :status :running :shutdown nil}))
+    :held nil :note-history [] :cancel-phrase nil :log [] :status :running :shutdown nil}))
 
 
 (def operation-names
@@ -186,7 +193,7 @@
 (defn- fault
   [state reason]
   (let [active (:active-recorder state)
-        state (cond-> (assoc state :status :failed :voice nil :active-recorder nil
+        state (cond-> (assoc state :status :failed :voice nil :active-recorder nil :cancel-phrase nil
                              :parser {:phase :disabled :tokens []} :notifications [])
                 active (assoc-in [:slots (dec active)] (empty-slot active)))
         [state effect] (issue state {:type :exit :exit-code 1 :reason reason
@@ -251,28 +258,47 @@
   [state]
   (let [[state effect] (issue state {:type :fade-mixer :duration-samples exit-ramp
                                      :discard-recording (:active-recorder state)})]
-    [(assoc state :status :exiting :voice nil :held nil :notifications []
+    [(assoc state :status :exiting :voice nil :held nil :notifications [] :cancel-phrase nil
             :parser {:phase :disabled :tokens []}
             :shutdown {:id (:id effect) :duration-samples exit-ramp
                        :end-sample (+ (:sample state) exit-ramp) :exit-code 0})
      [effect]]))
 
 
+(defn- phrase-prefix
+  [state pattern history]
+  (or (last (for [length (range 1 (inc (min (count history) (count pattern))))
+                  :let [suffix (vec (take-last length history))]
+                  :when (and (= (mapv #(mod (long (:midi %)) 12) suffix)
+                                (mapv #(mod (long %) 12) (take length pattern)))
+                             (<= (- (:sample state) (:sample (first suffix))) command-window))]
+              suffix)) []))
+
+
 (defn- wake-prefix
   [state history]
-  (let [pattern (get-in state [:profile :wake :midi])]
-    (or (last (for [length (range 1 (inc (min (count history) (count pattern))))
-                    :let [suffix (vec (take-last length history))]
-                    :when (and (= (mapv #(mod (long (:midi %)) 12) suffix)
-                                         (mapv #(mod (long %) 12) (take length pattern)))
-                               (<= (- (:sample state) (:sample (first suffix))) command-window))]
-                suffix)) [])))
+  (phrase-prefix state (get-in state [:profile :wake :midi]) history))
 
 
-(declare execute)
+(defn- cancel-context
+  [state]
+  (let [phase (get-in state [:parser :phase])
+        phase (if (= :announcing phase) (get-in state [:voice :next]) phase)
+        after (get-in state [:parser :cancel-after])
+        active (:active-recorder state)
+        slot (when active (get-in state [:slots (dec active)]))]
+    (cond
+      (and (= :wait-loop phase) (number? after)) {:kind :exit :after after}
+      (and active (#{:armed :recording} (:record-state slot)))
+      {:kind :record :loop-id active :after (or (:record-arm-sample slot) (:start-sample slot) 0)}
+      (and (= :wait-operation phase) (nil? active) (number? after))
+      {:kind :selected :loop-id (get-in state [:parser :loop-id]) :after after})))
 
 
-(defn- advance
+(declare execute cancel-note)
+
+
+(defn- advance-normal
   [state]
   (let [state (if (= :dormant (get-in state [:parser :phase]))
                 (assoc-in state [:parser :tokens] (wake-prefix state (get-in state [:parser :tokens]))) state)
@@ -292,7 +318,7 @@
                        (>= sample (get-in state [:parser :until])))
                 (assoc state :parser {:phase :dormant :tokens []}) state)]
     (cond
-      (and (get-in state [:parser :deadline])
+      (and (nil? (:cancel-phrase state)) (get-in state [:parser :deadline])
            (>= sample (+ (get-in state [:parser :deadline])
                          (if (= :wait-operation (get-in state [:parser :phase]))
                            action-confirmation-grace 0))))
@@ -308,6 +334,18 @@
                                        prompt :dormant {:loop-id loop-id})]
         [state (into effects prompted)])
       :else [state effects])))
+
+
+(defn- advance
+  [state]
+  (let [candidate (:cancel-phrase state)
+        context (cancel-context state)
+        expired? (and candidate (>= (:sample state) (:deadline candidate)))
+        changed? (and candidate (not= context (:context candidate)))
+        state (cond-> state (or expired? changed?) (assoc :cancel-phrase nil))]
+    (if (and expired? (not changed?) (#{:exit :selected} (:kind context)))
+      (cancel state :timeout)
+      (advance-normal state))))
 
 
 (defn- finalize-recording
@@ -357,7 +395,7 @@
         tokens (wake-prefix state (conj (get-in state [:parser :tokens]) note))]
     (if (= (count tokens) (count pattern))
       (announce (-> state (assoc-in [:parser :wake-onset] (:onset-sample (first tokens)))
-                    (assoc-in [:parser :scrape-after] (:onset-sample note))
+                    (assoc-in [:parser :cancel-after] (:onset-sample note))
                     (assoc-in [:parser :tokens] [])) :ready :wait-loop {})
       [(assoc-in state [:parser :tokens] tokens) []])))
 
@@ -373,11 +411,11 @@
       (= :dormant phase) (wake-note state note)
       (= :wait-loop phase)
       (if-let [selection (first (filter #(same-pitch-class? (:midi note) (:midi %))
-                                         (navigation state)))]
+                                        (navigation state)))]
         (cond
           (not (:enabled? selection)) (cancel state (:reason selection))
           :else (announce (-> state (assoc-in [:parser :loop-id] (:degree selection))
-                              (assoc-in [:parser :scrape-after] (:onset-sample note)))
+                              (assoc-in [:parser :cancel-after] (:onset-sample note)))
                           :loop-selected :wait-operation {:loop-id (:degree selection)}))
         (cancel state :invalid-selector))
       (= :wait-operation phase)
@@ -405,9 +443,10 @@
                   (exact-integer? onset-sample 0 sample))) (fault state :invalid-note-event)
         (or (<= id (:last-note-id state)) (= midi (:midi held))) [state []]
         :else
-        (command-note (-> state (assoc :held event :last-note-id (long id) :latest-note event)
-                          (update :note-history #(vec (take-last 12 (conj % midi)))))
-                      (update event :midi long)))
+        (cancel-note (-> state (assoc :held event :last-note-id (long id) :latest-note event)
+                         (update :note-history #(vec (take-last 12 (conj % midi)))))
+                     (assoc (update event :midi long)
+                            :legato? (= :pitch-change (get-in state [:latest-note :reason])))))
       :note-off
       (if (and held (= id (:id held)))
         (if (exact-integer? end-sample (:onset-sample held) sample)
@@ -424,7 +463,7 @@
     [(assoc state :voice nil) []]))
 
 
-(defn- scrape-selected
+(defn- cancel-selected
   [state loop-id]
   (let [slot (get-in state [:slots (dec loop-id)])
         [state cancellation] (cancel-speaking state)
@@ -447,6 +486,78 @@
       [state cancellation])))
 
 
+(defn- cancel-action
+  [state candidate]
+  (let [{:keys [kind loop-id]} (:context candidate)
+        onset (:onset-sample (first (:tokens candidate)))
+        slot (when loop-id (get-in state [:slots (dec loop-id)]))]
+    (case kind
+      :exit (begin-exit state)
+      :selected (cancel-selected state loop-id)
+      :record
+      (let [[state cancellation] (cancel-speaking state)]
+        (if (:armed? candidate)
+          (if (and (= :armed (:record-state slot)) (nil? (:pending slot)))
+            (let [state (-> state (assoc :active-recorder nil)
+                            (assoc-in [:slots (dec loop-id)] (empty-slot loop-id))
+                            (cooldown (:sample state)))
+                  [state _] (notify state :record-cancelled loop-id)]
+              [state cancellation])
+            (let [[state effects] (pending-effect
+                                    (assoc-in state [:slots (dec loop-id) :record-state] :finalizing)
+                                    loop-id {:type :record-cancel}
+                                    {:type :record-cancel :cancel-operation-id
+                                     (or (get-in slot [:pending :id]) (:record-start-id slot))})]
+              [(cooldown state (:sample state)) (into cancellation effects)]))
+          (let [boundary (stop-boundary (:master state) (:start-sample slot) onset)
+                state (assoc state :notifications [] :parser {:phase :dormant :tokens []})
+                [state effects] (finalize-recording state loop-id boundary)]
+            [(if (= :finalizing (get-in state [:slots (dec loop-id) :record-state]))
+               (assoc-in state [:parser :phase] :await-engine) state)
+             (into cancellation effects)])))
+      [state []])))
+
+
+(defn- cancel-note
+  "Recognize confirmed notes, including during prompts, before menu dispatch.
+  Degree 7 reserves a bounded word attempt; its suffix cannot become an action."
+  [state note]
+  (let [context (cancel-context state)
+        candidate (:cancel-phrase state)
+        valid? (and (number? (:cents note)) (<= -35.0 (:cents note) 35.0))
+        eligible? (and context valid? (>= (:onset-sample note) (:after context)))
+        pattern (cancel-pattern (:profile state))
+        tokens (when eligible?
+                 (phrase-prefix state pattern (conj (or (:tokens candidate) []) note)))
+        octave-hop? (and eligible? candidate (:legato? note)
+                         (same-pitch-class? (:midi note) (:midi (last (:tokens candidate)))))
+        wake-tokens (when (and eligible? (= :record (:kind context))
+                               (= :dormant (get-in state [:parser :phase])))
+                      (wake-prefix state (conj (get-in state [:parser :tokens]) note)))
+        wake-pattern (get-in state [:profile :wake :midi])
+        full-wake? (and (= (count wake-tokens) (count wake-pattern))
+                        (not= (mapv #(mod % 12) wake-pattern)
+                              (mapv #(mod % 12) (take (count wake-pattern) pattern))))
+        state (assoc state :cancel-phrase nil)]
+    (cond
+      octave-hop? [(assoc state :cancel-phrase candidate) []]
+      (seq tokens)
+      (let [slot (when-let [id (:loop-id context)] (get-in state [:slots (dec id)]))
+            candidate (merge {:context context :deadline (+ (:sample note) command-window)
+                              :armed? (and (= :record (:kind context))
+                                           (or (= :armed (:record-state slot))
+                                               (< (:onset-sample note) (:start-sample slot 0))))}
+                             candidate {:tokens tokens})]
+        (cond
+          (= (count tokens) (count cancel-degrees)) (cancel-action state candidate)
+          full-wake? (wake-note state note)
+          :else [(cond-> (assoc state :cancel-phrase candidate)
+                   wake-tokens (assoc-in [:parser :tokens] wake-tokens)) []]))
+      (and candidate (#{:exit :selected} (:kind context)))
+      (cancel state (if valid? :unexpected-note :out-of-tune))
+      :else (command-note state note))))
+
+
 (defn- audio-event
   [state event]
   (let [{:keys [type loop-id operation-id]} event
@@ -465,51 +576,6 @@
             [state [effect]])
           (fault state :premature-fade-completion))
         [state []])
-      (= :scrape type)
-      (let [phase (get-in state [:parser :phase])
-            phase (if (= :announcing phase) (get-in state [:voice :next]) phase)
-            after (get-in state [:parser :scrape-after])
-            valid-onset? (exact-integer? (:onset-sample event) 0 (:sample event))
-            contextual? (and valid-onset? (#{:wait-loop :wait-operation} phase) after
-                             (>= (:onset-sample event) after))
-            recording? (and (= loop-id (:active-recorder state))
-                            (= :recording (:record-state slot))
-                            (= operation-id (:record-start-id slot)))
-            active (:active-recorder state)
-            armed-slot (when active (get-in state [:slots (dec active)]))
-            armed? (and valid-onset? (= :armed (:record-state armed-slot))
-                        (>= (:onset-sample event) (:record-arm-sample armed-slot 0))
-                        (or (and (= :record-start (get-in armed-slot [:pending :type]))
-                                 (= loop-id active) (= operation-id (get-in armed-slot [:pending :id])))
-                            (and (= 0 loop-id) (= 0 operation-id))))]
-        (cond
-          (not valid-onset?) (fault state :invalid-scrape-onset)
-          (and contextual? (= phase :wait-loop)) (begin-exit state)
-          armed?
-          (let [[state cancellation] (cancel-speaking state)
-                pending (:pending armed-slot)]
-            (if (= :record-start (:type pending))
-              (let [[state effects] (pending-effect
-                                      (assoc-in state [:slots (dec active) :record-state] :finalizing)
-                                      active {:type :record-cancel}
-                                      {:type :record-cancel :cancel-operation-id (:id pending)})]
-                [(cooldown state (:sample state)) (into cancellation effects)])
-              (let [state (-> state (assoc :active-recorder nil)
-                              (assoc-in [:slots (dec active)] (empty-slot active))
-                              (cooldown (:sample state)))
-                    [state _] (notify state :record-cancelled active)]
-                [state cancellation])))
-          (and recording? (>= (:onset-sample event) (:start-sample slot)))
-          (let [boundary (stop-boundary (:master state) (:start-sample slot) (:onset-sample event))
-                [state cancellation] (cancel-speaking state)
-                state (assoc state :notifications [] :parser {:phase :dormant :tokens []})
-                [state effects] (finalize-recording state loop-id boundary)]
-            [(if (= :finalizing (get-in state [:slots (dec loop-id) :record-state]))
-               (assoc-in state [:parser :phase] :await-engine) state)
-             (into cancellation effects)])
-          (and contextual? (= phase :wait-operation) (nil? (:active-recorder state)))
-          (scrape-selected state (get-in state [:parser :loop-id]))
-          :else [state []]))
       (and (= :record-limit type) (= loop-id (:active-recorder state))
            (= :recording (:record-state slot)))
       (let [start (:start-sample slot)
@@ -604,8 +670,8 @@
   (let [active (:active-recorder state)
         armed? (and active (= :armed (get-in state [:slots (dec active) :record-state]))
                     (nil? (get-in state [:slots (dec active) :pending])))
-        state (cond-> (assoc state :held nil :event-seq (if sequence (max sequence (:event-seq state))
-                                                            (:event-seq state)))
+        state (cond-> (assoc state :held nil :cancel-phrase nil :event-seq (if sequence (max sequence (:event-seq state))
+                                                                               (:event-seq state)))
                 armed? (assoc :active-recorder nil)
                 armed? (assoc-in [:slots (dec active)] (empty-slot active)))]
     (if (some :pending (:slots state))
@@ -641,7 +707,7 @@
       (= :engine-error type) (fault state :engine-failure)
       (= :engine-ended type)
       (let [active (:active-recorder state)
-            state (cond-> (assoc state :status :stopped :voice nil :notifications [] :active-recorder nil
+            state (cond-> (assoc state :status :stopped :voice nil :notifications [] :active-recorder nil :cancel-phrase nil
                                  :parser {:phase :disabled :tokens []})
                     active (assoc-in [:slots (dec active)] (empty-slot active)))
             [state effect] (issue state {:type :exit :exit-code 0 :discard-recording active})]
@@ -672,6 +738,9 @@
             state (if (and (= :prompt-finished type) (= :guard (get-in state [:voice :state]))
                            (nil? (get-in state [:voice :until])))
                     (assoc-in state [:voice :until] (+ sample guard-samples)) state)
+            state (if (and (:cancel-phrase state)
+                           (not= (cancel-context state) (get-in state [:cancel-phrase :context])))
+                    (assoc state :cancel-phrase nil) state)
             state (if (= :tick type) state
                       (update state :log #(vec (take-last 32 (conj % (select-keys event [:type :sample :loop-id]))))))]
         [state (into before effects)]))))

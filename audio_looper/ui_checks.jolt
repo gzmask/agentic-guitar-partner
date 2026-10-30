@@ -185,28 +185,28 @@
                         (assoc-in [:slots 0 :record-state] :recording)
                         (assoc-in [:slots 0 :start-sample] 0))
           view (dashboard/view recording (assoc context :debug? true :columns 80 :rows 24
-                                                 :scrape {:score 0.94 :db -55.0 :noise -64.0
-                                                          :threshold -58.0 :gate? true :calibration 80
-                                                          :hits 3 :detections 2}))
+                                                :pitch {:midi 71 :hz 493.883 :cents 0 :db -26 :gate? true}))
           output (dashboard/render view)]
-      (let [calibrating (dashboard/view (control/initial-state)
-                                       (assoc context :scrape {:score 0 :db -70 :noise -75
-                                                               :calibration 40}))]
-        (verify! "startup shows a mute-strings instruction until noise calibration completes"
-                 (str/includes? (:instruction calibrating) "keep strings muted (40/80)")))
-      (verify! "recording shows direct scrape stop" (str/includes? output "Scrape low E to stop"))
-      (verify! "debug shows scrape score" (str/includes? output "Scrape match=0.94"))
-      (doseq [text ["noise=-64.0" "gate=-58.0" "native=2" "cal=80/80" "Keyboard" "EVENTS"]]
-        (verify! (str "compact debug keeps visible scrape diagnostics: " text)
+      (verify! "recording shows the direct note-based cancel word"
+               (str/includes? output "Cancel 7-6-7-6 to finish recording"))
+      (doseq [text ["Cancel (any octave)" "7-6-7-6 [B4 A4 B4 A4]" "0/4" "B4 MIDI=71" "Keyboard" "EVENTS"]]
+        (verify! (str "compact debug keeps visible note/cancel information: " text)
                  (str/includes? output text)))
+      (verify! "retired acoustic detector diagnostics never appear" (not (str/includes? output "Scrape")))
+      (let [pending (dashboard/view (assoc recording :cancel-phrase
+                                           {:tokens [{:midi 71} {:midi 69}] :deadline 44100})
+                                    (assoc context :columns 80 :rows 24))
+            compact (dashboard/render pending)]
+        (verify! "cancel progress and word deadline are visible"
+                 (and (str/includes? compact "2/4") (= "1.0s" (:timeout pending)))))
       (let [waiting (assoc-in (control/initial-state) [:parser :phase] :wait-loop)
             compact (dashboard/render (assoc view :phase "WAIT_LOOP" :options (control/navigation waiting)))]
-        (doseq [text ["C4  select loop" "A4  select loop" "native=2" "Keyboard" "EVENTS"]]
-          (verify! (str "six-selector compact debug keeps menu and footer: " text)
+        (doseq [text ["C4  select loop" "A4  select loop" "Cancel (any octave)" "Keyboard" "EVENTS"]]
+          (verify! (str "six-selector compact debug keeps word/menu/footer: " text)
                    (str/includes? compact text))))
       (let [[renderer _] (dashboard/plan (dashboard/renderer false) view 0)
-            [_ line] (dashboard/plan renderer (assoc view :scrape "Scrape match=0.95") 100)]
-        (verify! "plain debug output shows updated scrape score" (str/includes? line "Scrape match=0.95"))))
+            [_ line] (dashboard/plan renderer (assoc view :cancel-progress "3/4") 100)]
+        (verify! "plain debug output shows cancel-word progress" (str/includes? line "CANCEL 3/4"))))
     (let [queued (-> state
                      (assoc :parser {:phase :dormant :tokens []} :sample 10)
                      (assoc-in [:slots 0 :play-state] :queued-start)

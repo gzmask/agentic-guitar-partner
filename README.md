@@ -18,9 +18,9 @@ It provides:
 - one active recorder, no overdub;
 - octave-independent guitar commands based on C-major scale degrees;
 - sample-accurate recording and playback boundaries;
-- context-sensitive low-E string scrape to stop recording or playback, or exit;
+- a context-sensitive 7-6-7-6 cancel word to stop recording/playback, or exit;
 - outer-silence trimming for the first/master loop;
-- synchronized later loops whose completed master-cycle count is set by the stop scrape;
+- synchronized later loops whose cycle count is set by the cancel word's first note;
 - queued cycle-boundary playback;
 - spoken prompts mixed by Csound, not played directly by `say`;
 - a fixed ANSI dashboard and a line-oriented `--no-tui` mode;
@@ -72,66 +72,74 @@ Wake phrase:
 C D C D
 ```
 
-The low-E scrape is the context-sensitive stop/exit gesture:
+Cancel word (scale degrees **7 6 7 6**):
+
+```text
+B A B A
+```
+
+The cancel word follows the chosen/saved scale and accepts supported octaves.
+It is derived from the existing profile, so old sessions need no migration or
+re-recording. It replaces the old low-E scrape; there is no scrape classifier,
+spectral template, or startup scrape calibration.
 
 | Guitar sequence | Action |
 | --- | --- |
 | Wake → degree 1–6 (C–A), then wait | Select an empty slot and arm recording |
-| While recording → scrape low E | Stop recording directly |
+| While recording → cancel word | Finish recording and keep the retained take |
+| While armed → cancel word | Cancel that take, even if recording starts during the word |
 | Wake → slot → degree 2 (D) | Start that slot's playback |
-| Wake → slot → scrape low E | Stop that slot's playback, or cancel its queued start |
+| Wake → slot → cancel word | Stop that slot's playback, or cancel its queued start |
 | Wake → slot → degree 3 (E) | Erase that stopped slot |
-| Wake → scrape low E | Fade out and exit immediately, discarding any active recording |
+| Wake → cancel word | Fade out and exit, discarding any active recording |
 
-`Wake → slot` is a prefix of the playback and erase commands, so after the slot
-selection prompt there is a two-second action window plus 350 ms recognition
-grace. If no action arrives, an **empty, idle** slot arms recording; a slot with
-an existing clip never auto-records or overwrites it. Degree 1 after slot
-selection can also explicitly arm recording. Wait for the recording-armed prompt
-and start cue before playing the take. Notes played during spoken prompts and
-their guards are ignored; wait for the prompts before selecting a note.
-Contextual scrapes are accepted during those prompts. A scrape also cancels an
-armed recording.
+`Wake → slot` is a prefix of playback/erase commands. After the selection prompt
+there is a two-second action window plus 350 ms recognition grace. Without an
+action an **empty, idle** slot arms recording; an occupied clip never
+auto-records or overwrites. Degree 1 can also explicitly arm an empty slot.
+Wait for the armed prompt and start cue before playing the take.
 
-The experimental scrape recognizer uses an aggregated spectral fingerprint from
-six low-E scrapes with varied speed, force, and contact position through the
-same FX100/pickup/preset chain. It is not a general classifier or pitch
-recognizer. Keep the strings muted during the initial ~0.8-second noise
-calibration; the dashboard shows progress. A rolling lower-percentile estimate
-can recover after a quieter interval but never learns playing as a higher noise
-floor. The level gate opens 6 dB above that floor and holds down to 3 dB above it,
-so a weak scrape's envelope dips do not discard otherwise matching frames.
-The 0.90 fingerprint match, spectral-shape guards and eight-hit confirmation are
-unchanged. Different guitars, effects, levels, or normal playing can still cause
-missed or false triggers. If the preset/gain changes, restart for fresh calibration.
-`[d]` shows match, level, noise, actual gate threshold/state, hit count and native
-detection count on separate lines. A rising native count confirms classifier
-output, not that the current command context accepted an action. A recognized gesture
-stays latched until its spectral match has been absent for 120 ms and the 650 ms
-cooldown has elapsed. Ordinary guitar playing can release the match; you do not
-need to silence the input before a fresh scrape. Short/quiet intentional scrapes
-remain supported by the original matching policy.
+Play four clean single notes within four seconds; one held note is not a word.
+The recognizer uses the existing confirmed pitch events and ±35-cent tolerance,
+not an effect-specific spectral fingerprint. Alternating notes may be legato;
+legato octave jumps do not add syllables. Once degree 7 starts a cancel attempt,
+its suffix is not dispatched as slot/action commands. A partial attempt may span
+the normal action window; a wrong/timed-out menu attempt cancels the command
+rather than silently arming a recorder. Partial/wrong words do not stop an
+ongoing recording. Completed words retain their current wake/slot/take context.
 
-On a recognized scrape, finalization uses its estimated onset, not the later
-recognition time. The onset is an analysis-window estimate, not a guarantee of
-exact physical timing. An unrecognized scrape remains in the take. For later
-clips the stop is rounded back to the most recent completed master cycle; if no
-cycle is complete, recording continues. Verify results before relying on this
-experimental control.
+Prompts and guards pause ordinary menu notes, but contextual cancel words remain
+available. Choose a custom wake distinct from the cancel word; preferably use
+degrees 1–5 to avoid ambiguous overlapping sequences. During recording the
+reserved cancel word takes precedence over an identical/contained wake pattern.
+The default wake and cancel words use disjoint notes.
 
-For the first/master clip, record freely and stop with a scrape. Later clips arm
-without asking for a cycle count, start on the next shared master boundary, and
-continue until another low-E scrape. That scrape determines the length by keeping
-all complete master cycles before its estimated onset. If it arrives before one
-complete cycle, recording continues. At the 120-second capacity limit, the
-looper keeps the largest complete-cycle prefix that fits.
+Ordinary EQ/drive no longer requires a scrape template, but **not every effect
+is guaranteed**: noise gates, pitch shifting, harmonizers, strong modulation or
+delay can still disrupt single-note tracking. Music containing the cancel word
+can also stop a take. `[d]` shows raw pitch/level/gate, note history and cancel
+progress; seeing the right notes is distinct from receiving a native operation
+acknowledgement. Keyboard `q`/Ctrl+C remain safety exits.
 
-Erase is a direct command and is published only after the native engine
-acknowledges it. Playback stop occurs at the next master boundary; cancelling a
-queued playback start also waits for native acknowledgement. `Wake → scrape`
-and keyboard `q` use the same safe exit fade, without additional confirmation.
-`[d]` toggles pitch debug and `[c]` reopens input
-selection when all slots are empty and idle.
+On completion, recording finalization uses the **first note's detected onset**,
+not the last note or recognition time. Pitch analysis can lag the physical
+attack, so this is an estimate and some attack audio may remain. Incomplete or
+unrecognized words remain recorded. For later clips, keep the most recent
+complete master cycles before that first onset; if no cycle is complete,
+recording continues. The native 120-second capacity limit still takes precedence
+if reached before word confirmation.
+
+The first/master clip records freely. Later clips start on the next shared
+master boundary without a cycle-count question. The cancel word selects the
+completed-cycle prefix. At capacity the largest complete-cycle prefix is kept.
+Actual stereo PCM remains unchanged; publication and persistence still wait for
+the matching native acknowledgement.
+
+Erase is direct and requires its native acknowledgement. Playback stop is queued
+at the next master boundary; cancelling a queued start also waits for native
+acknowledgement. `Wake → cancel word` and keyboard `q` share the safe exit fade,
+without an extra confirmation. `[c]` reopens setup only when all slots are empty
+and idle.
 
 The first finalized clip establishes the master cycle. Its leading/trailing
 silence is trimmed from bounded 10 ms stereo-RMS summaries at -50 dBFS, retaining
@@ -239,33 +247,24 @@ The PCM looper’s complete offline gate is:
 jolt guitar-audio-looper.jolt --check
 ```
 
-It covers pure command policy, setup/dashboard behavior, runtime effect dispatch,
-sequenced native transport, every recorded stereo PCM sample, arbitrary sample
-boundaries, silence trim, six-slot mixing, capacity handling, prompt playback,
-session save/reload (every retained stereo sample), atomic failure recovery,
-invalid-file/lock rejection, the native `pitchamdf` lifecycle, and the native scrape recognizer against six
-synthetic profile fixtures plus negative tone/noise fixtures. It also checks
-fresh scrapes after ordinary playing, sustained-gesture deduplication, local-time
-names and legacy session compatibility. Noise-recovery, music-resistant noise
-estimation and level-gate hysteresis also have generated regressions. Playback
-makeup checks cover raw-sample preservation, stereo balance, exact retained-range
+It covers command policy, setup/dashboard behavior, runtime dispatch, sequenced
+native transport, every recorded stereo PCM sample, arbitrary sample boundaries,
+silence trim, six-slot mixing, capacity handling, prompt playback, session
+save/reload, atomic failure recovery, invalid-file/lock rejection and the native
+`pitchamdf` lifecycle.
+
+Cancel-word checks cover mixed octaves, duplicates, wrong/incomplete words,
+context/sequence gaps, menu timeouts, prompts, queued playback cancellation races,
+armed-to-recording transitions and first-note cycle selection. Actual native
+pitch events from generated clean, harmonic-rich and clipped-tone fixtures drive
+host finalization and matching native acknowledgements, retaining every stereo
+sample. These are offline regressions, **not hardware validation across all FX100
+presets**. The former recorded-scrape environment-variable checks are retired.
+
+Playback makeup checks retain raw samples, stereo balance, exact retained-range
 measurement, cache invalidation/reload, silence/noise-floor/full-scale safety,
-and six coherent boosted loops with monitoring. It opens no audio device.
-
-When the original 18.7-second six-scrape FX100 recording is available outside git,
-include its labeled recording regression (all six, once each, no extras):
-
-```bash
-AUDIO_LOOPER_SIX_SCRAPES_WAV=/tmp/low-e-scrapes-6.wav \
-  jolt guitar-audio-looper.jolt --check-engine
-```
-
-The additional opt-in `AUDIO_LOOPER_CURRENT_SCRAPES_WAV` fixture is the labeled
-18.51-second FX100 failure recording (clear scrapes near 12.3/14.6 seconds, normal
-notes near the beginning). `AUDIO_LOOPER_SCRAPE_NOISE_WAV` selects the earlier
-9.05-second noise-only capture. These recordings stay outside git; their checks
-run only when explicitly selected. The ambiguous weak 8.9-second transient is
-not forced into a command by weakening the spectral matcher.
+and six coherent boosted loops with monitoring. All checks use temporary files
+and open no audio device.
 
 Static development checks:
 

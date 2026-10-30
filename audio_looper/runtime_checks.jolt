@@ -189,37 +189,48 @@
                (= [[2 123 7000]] @measurements)))))
 
 
-(defn- check-scrape-transport!
+(defn- check-cancel-transport!
   []
-  (let [channels (atom {"engine/clock" 110000 "e/write" 1 "engine/fatal" 0 "h/ack" 0
-                        "ev/1/seq" 1 "ev/1/type" 12 "ev/1/sample" 110000
-                        "ev/1/id" 7 "ev/1/slot" 1 "ev/1/a" 101000 "ev/1/b" 0.95
-                        "scrape/score" 0.95 "scrape/db" -55 "scrape/noise" -64
-                        "scrape/threshold" -58 "scrape/gate" 1 "scrape/calibration" 80
-                        "scrape/hits" 3 "scrape/detections" 2})
+  (let [events [[1 103500 1 71 101000 0]
+                [2 111500 1 109000 2 0]
+                [1 111500 2 69 109000 0]
+                [2 119500 2 117000 2 0]
+                [1 119500 3 71 117000 0]
+                [2 127500 3 125000 2 0]
+                [1 127500 4 69 125000 0]]
+        channels (atom (reduce (fn [channels [index [type sample id a b c]]]
+                                 (let [sequence (inc index)
+                                       prefix (str "ev/" sequence "/")]
+                                   (reduce-kv (fn [channels field value] (assoc channels (str prefix field) value))
+                                              channels {"seq" sequence "type" type "sample" sample "id" id
+                                                        "slot" 0 "a" a "b" b "c" c "d" 0 "e" -20})))
+                               {"engine/clock" 127520 "e/write" 7 "engine/fatal" 0 "h/ack" 0}
+                               (map-indexed vector events)))
         running {:instance :fake :transport (atom {:event-seq 0 :next-seq 1 :in-flight nil :queue []})}]
     (with-redefs [native/check-health! (fn [_] nil)
                   native/control (fn [_ channel] (get @channels channel 0))
                   native/set-control! (fn [_ channel value] (swap! channels assoc channel value))
                   native/finished? (fn [_] false)]
       (let [snapshot (engine/poll! running)
-            event (first (:events snapshot))
             state (-> (control/initial-state)
-                      (assoc :sample 100000 :active-recorder 1)
+                      (assoc :sample 100000 :active-recorder 1 :effect-seq 7)
                       (assoc-in [:slots 0 :record-state] :recording)
                       (assoc-in [:slots 0 :record-start-id] 7)
                       (assoc-in [:slots 0 :start-sample] 10000))
-            [state effects] (control/step state event)]
-        (verify! "scrape decodes recorder id and onset before ring acknowledgement"
-                 (and (= 1 (get @channels "e/ack")) (= 7 (:operation-id event))
-                      (= 101000 (:onset-sample event))))
-        (verify! "scrape diagnostics preserve the native gate and detection count"
-                 (= {:score 0.95 :db -55 :noise -64 :threshold -58 :gate? true
-                     :calibration 80 :hits 3 :detections 2} (:scrape snapshot)))
-        (verify! "scrape transport requests finalization at the gesture onset"
-                 (and (= :record-finalize (:type (first effects)))
+            [state _] (runtime/apply-events! running (atom {}) state (:events snapshot))
+            operation (first (:queue @(:transport running)))]
+        (verify! "word reuses ordered native note events, not an acoustic gesture event"
+                 (and (= 7 (get @channels "e/ack"))
+                      (= [71 69 71 69] (mapv :midi (filter #(= :note-on (:type %)) (:events snapshot))))))
+        (verify! "confirmed word queues a correlated finalize using the first note onset"
+                 (and (= :record-finalize (:type operation)) (= 1 (:loop-id operation))
                       (= 101000 (get-in state [:slots 0 :pending :boundary-sample]))
-                      (= :empty (get-in state [:slots 0 :clip-state]))))))))
+                      (= :empty (get-in state [:slots 0 :clip-state]))))
+        (engine/poll! running)
+        (verify! "normal sequenced host mailbox carries word finalization"
+                 (and (= 1 (get @channels "h/seq")) (= 2 (get @channels "h/op"))
+                      (= (:id operation) (get @channels "h/id"))
+                      (= 91000 (get @channels "h/length"))))))))
 
 
 (defn- check-persistence-boundary!
@@ -262,6 +273,6 @@
   (check-terminal-engine-states!)
   (check-quit-priority!)
   (check-engine-transport!)
-  (check-scrape-transport!)
+  (check-cancel-transport!)
   (check-persistence-boundary!)
   (println "PASS runtime dispatch, ack-only persistence, correlation, quit priority and engine endings"))

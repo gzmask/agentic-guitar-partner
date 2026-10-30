@@ -255,7 +255,7 @@
                (dashboard/safe-text (get-in session [:input :name]))
                "\nOutput: " (dashboard/safe-text (get-in session [:output :name]))
                "\nSetup is complete; the looper engine opens now. Restored tracks remain stopped."
-               "\nKeep strings muted until scrape noise calibration completes (~1 second after audio starts)."
+               "\nCancel word: scale degrees 7-6-7-6 in any supported octave; C major is B-A-B-A."
                "\nUse low volume/headphones; avoid direct-monitor doubling and feedback.\n")))
 
 
@@ -283,9 +283,9 @@
               [state exit-code] (runtime/advance! running cache state snapshot quit?)
               context (merge session (native/terminal-size!)
                              {:session-id (get-in @store [:metadata :id])
-                              :preview? false :debug? debug? :pitch (:pitch snapshot) :scrape (:scrape snapshot)})
+                              :preview? false :debug? debug? :pitch (:pitch snapshot)})
               [renderer frame] (dashboard/plan renderer (dashboard/view state context)
-                                                 (quot (System/nanoTime) 1000000))]
+                                               (quot (System/nanoTime) 1000000))]
           (when frame (write! frame))
           (if (some? exit-code)
             {:exit-code exit-code :reconfigure? (or reconfigure? configure?)}
