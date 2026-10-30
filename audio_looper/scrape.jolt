@@ -30,8 +30,12 @@ instr 11
   kstart[] fillarray 42,47,51,56,61,67,72,78,85,91,99,106,114,123,132,141,151,162,173,185,198,211,225,240
   kend[] fillarray 47,51,56,61,67,72,78,85,91,99,106,114,123,132,141,151,162,173,185,198,211,225,240,256
   khist[] init 121
+  klevels[] init 80
+  kcursor init 0
   knoise init -90
   kcal init 0
+  klevel init 0
+  kdetected init 0
   khits init 0
   kfirst init -1
   klast init -1
@@ -39,21 +43,42 @@ instr 11
   kreleased init -1
   kcooldown init 0
   if kL == 1 && kR == 1 then
+    ; Keep an 80-frame histogram, not an RMS average that learns guitar tails
+    ; as background. After warmup only quieter percentile estimates may lower
+    ; the floor; a later quiet interval can repair a contaminated startup.
+    kready = (kcal >= 80 ? 1 : 0)
+    kbin = int(limit(kdb+120, 0, 120))
     if kcal < 80 then
-      kbin = int(limit(kdb+120, 0, 120))
-      khist[kbin] = khist[kbin]+1
       kcal = kcal+1
-      ktarget = ceil(kcal*0.2)
-      ki = 0
-      kcount = 0
-      while ki < 121 && kcount < ktarget do
-        kcount = kcount+khist[ki]
-        ki = ki+1
-      od
-      knoise = limit(ki-121, -110, -30)
     else
-      if kdb < knoise+6 then
-        knoise = max(-110, knoise+0.005*(kdb-knoise))
+      khist[klevels[kcursor]] = khist[klevels[kcursor]]-1
+    endif
+    klevels[kcursor] = kbin
+    kcursor = (kcursor+1)%80
+    khist[kbin] = khist[kbin]+1
+    ktarget = ceil(kcal*0.2)
+    ki = 0
+    kcount = 0
+    while ki < 121 && kcount < ktarget do
+      kcount = kcount+khist[ki]
+      ki = ki+1
+    od
+    kestimate = limit(ki-121, -110, -30)
+    if kready == 0 then
+      knoise = kestimate
+    else
+      knoise = min(knoise,kestimate)
+    endif
+    kopen = max(-100,knoise+6)
+    if kready == 1 then
+      ; Measured weak FX100 scrapes cross +6 dB but dip during their envelope.
+      ; Hold to +3 dB instead of discarding every dip as the old +10 dB gate did.
+      if klevel == 0 then
+        if kdb >= kopen then
+          klevel = 1
+        endif
+      elseif kdb < kopen-3 then
+        klevel = 0
       endif
       ksum = 0
       klog = 0
@@ -102,13 +127,9 @@ instr 11
         kg = kg+1
       od
       kscore = kdot/max(sqrt(knorm), 0.00000000000000000001)
-      ; Six varied captures include a quieter, shorter scrape. Ten dB above the
-      ; calibrated floor plus eight matching 10 ms hops keeps that gesture while
-      ; still requiring the spectral-shape guards and a sustained match.
-      kgood = (kscore >= 0.90 && kdb >= max(-100,knoise+10) && kflat >= 0.02 && kentropy >= 0.48 && kweighted/max(ksum,0.00000000000000000001) >= 400 && khigh/max(ksum,0.00000000000000000001) >= 0.03 ? 1 : 0)
-      chnset kscore, \"scrape/score\"
-      chnset kdb, \"scrape/db\"
-      chnset knoise, \"scrape/noise\"
+      ; Keep the measured fingerprint, shape guards and eight-hit confirmation.
+      ; The level gate has separate opening/release thresholds, like note input.
+      kgood = (kscore >= 0.90 && klevel == 1 && kflat >= 0.02 && kentropy >= 0.48 && kweighted/max(ksum,0.00000000000000000001) >= 400 && khigh/max(ksum,0.00000000000000000001) >= 0.03 ? 1 : 0)
       krecording = 0
       if gkRecSlot >= 0 then
         if gkRec[gkRecSlot] == 1 || gkRec[gkRecSlot] == 2 then
@@ -142,6 +163,7 @@ instr 11
           else
             Emit 12, gkClock, 0, 0, kfirst, kscore, 0, 0, 0
           endif
+          kdetected = kdetected+1
           klatched = 1
           kcooldown = gkClock+28665
           khits = 0
@@ -150,5 +172,13 @@ instr 11
         endif
       endif
     endif
+    chnset kscore, \"scrape/score\"
+    chnset kdb, \"scrape/db\"
+    chnset knoise, \"scrape/noise\"
+    chnset kopen, \"scrape/threshold\"
+    chnset klevel, \"scrape/gate\"
+    chnset kcal, \"scrape/calibration\"
+    chnset khits, \"scrape/hits\"
+    chnset kdetected, \"scrape/detections\"
   endif
 endin")

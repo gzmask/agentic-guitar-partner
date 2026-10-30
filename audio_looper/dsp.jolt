@@ -505,7 +505,8 @@ endin")
                          (map #(str "chn_k \"" % "\", 2\n")
                               ["h/ack" "e/write" "engine/clock" "engine/fatal" "engine/peak"
                                "pitch/hz" "pitch/db" "pitch/midi" "pitch/cents" "pitch/gate"
-                               "scrape/score" "scrape/db" "scrape/noise"])
+                               "scrape/score" "scrape/db" "scrape/noise" "scrape/threshold"
+                               "scrape/gate" "scrape/calibration" "scrape/hits" "scrape/detections"])
                          (for [i (range 6)] (str "chn_k \"slot/" i "/length\", 2\n"))
                          (for [i (range ring-size) field (conj fields "seq")]
                            (str "chn_k \"ev/" i "/" field "\", 2\n")))

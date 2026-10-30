@@ -1,7 +1,8 @@
 (ns audio-looper.engine-checks
   "Finite offline production-DSP checks using generated PCM and an optional,
   explicitly selected original FX100 recording. Never opens an audio device."
-  (:require [audio-looper.csound :as native]
+  (:require [audio-looper.control :as control]
+            [audio-looper.csound :as native]
             [audio-looper.engine :as engine]
             [audio-looper.notes :as notes]
             [audio-looper.scrape :as scrape]
@@ -41,7 +42,7 @@
             lengths (mapv #(long (native/control (:instance running) (str "slot/" % "/length"))) (range 6))
             peak (native/control (:instance running) "engine/peak")]
         (engine/close! running)
-        {:events (:events snapshot) :tables data :lengths lengths :peak peak
+        {:events (:events snapshot) :scrape (:scrape snapshot) :tables data :lengths lengths :peak peak
          :wave (when (:output configuration) (wav/read! (:output configuration)))})
       (finally (engine/close! running)))))
 
@@ -376,6 +377,80 @@
       (println "PASS original six-scrape FX100 recording: 6/6, no extra detections"))))
 
 
+(defn- check-scrape-level-gate!
+  [owner]
+  (let [sound (scrape-expression scrape/template)
+        wave (str "if(lt(t,1.1),0.1*sin(2*PI*220*t),"
+                  "if(between(t,1.6,2.0),0.01*(" sound "),0))")
+        input (generate! owner "scrape-calibration-recovery.wav" (str wave "|" wave) 3)
+        result (perform! {:input input :duration 3 :capacity 1 :detect? false} [])]
+    (verify! "a quiet interval recovers noise calibration after startup guitar activity"
+             (= 1 (count (filter #(= :scrape (:type %)) (:events result))))))
+  (let [wave "if(lt(t,1),0.0002,0.00035)*sin(2*PI*220*t)"
+        input (generate! owner "scrape-noise-not-music.wav" (str wave "|" wave) 3)
+        options {:input input :duration 0.95 :capacity 1 :detect? false}
+        baseline (get-in (perform! options []) [:scrape :noise])
+        after-playing (get-in (perform! (assoc options :duration 3) []) [:scrape :noise])]
+    (verify! "ordinary playing cannot raise the learned noise floor"
+             (<= after-playing (+ baseline 1.0))))
+  (let [wave "if(lt(t,0.8),0.0002,if(lt(t,1.1),0.0006,if(lt(t,1.6),0.0003,0.0001)))*sin(2*PI*220*t)"
+        input (generate! owner "scrape-level-hysteresis.wav" (str wave "|" wave) 2)
+        options {:input input :duration 1.4 :capacity 1 :detect? false}
+        held (:scrape (perform! options []))
+        released (:scrape (perform! (assoc options :duration 1.9) []))]
+    (verify! "an open level gate holds through modest envelope dips"
+             (and (:gate? held) (< (:db held) (:threshold held))
+                  (>= (:db held) (- (:threshold held) 3))))
+    (verify! "the level gate closes after a real envelope release" (false? (:gate? released))))
+  (println "PASS scrape noise recovery, music-resistant floor and level hysteresis"))
+
+
+(defn- check-current-scrape-recording!
+  "Opt-in regression for the 18.51-second live-failure capture: two clear
+  late scrapes and known normal notes at the beginning. The weak 8.9s transient
+  is deliberately not promoted to a required command by weakening the matcher."
+  []
+  (when-let [input (System/getenv "AUDIO_LOOPER_CURRENT_SCRAPES_WAV")]
+    (let [wave (wav/read! input)
+          duration (/ (:frames wave) 44100.0)
+          _ (verify! "current diagnostic fixture is stereo 44.1 kHz and 18..20 seconds"
+                     (and (= 44100 (:rate wave)) (= 2 (:channels wave)) (<= 18 duration 20)))
+          record-start (* 11 44100)
+          result (perform! {:input input :duration duration :capacity (* 8 44100) :detect? false
+                            :operations [{:type :record-start :sample (- record-start 64)
+                                          :at-sample record-start :id 7}]} [])
+          matches (filter #(= :scrape (:type %)) (:events result))
+          in-window? (fn [event [start end]]
+                       (<= (* start 44100) (:onset-sample event) (* end 44100)))]
+      (doseq [window [[12.15 12.55] [14.40 14.90]]]
+        (verify! "a clear current FX100 scrape crosses the level gate exactly once"
+                 (= 1 (count (filter #(in-window? % window) matches)))))
+      (verify! "current ordinary-note passage does not become a scrape"
+               (not-any? #(in-window? % [0 4.5]) matches))
+      (let [event (first (filter #(in-window? % [12.15 12.55]) matches))
+            state (-> (control/initial-state)
+                      (assoc :sample record-start :event-seq (dec (:seq event)) :active-recorder 1)
+                      (assoc-in [:slots 0 :record-state] :recording)
+                      (assoc-in [:slots 0 :record-start-id] 7)
+                      (assoc-in [:slots 0 :start-sample] record-start))
+            [stopping effects] (control/step state event)]
+        (verify! "the real weak-scrape event stops the correlated active recorder"
+                 (and (= 1 (:loop-id event)) (= 7 (:operation-id event))
+                      (= :record-finalize (:type (first effects)))
+                      (= (:onset-sample event) (get-in stopping [:slots 0 :pending :boundary-sample]))
+                      (= :empty (get-in stopping [:slots 0 :clip-state])))))
+      (println "PASS current FX100 capture: clear scrapes stop the correlated recorder; normal notes rejected")))
+  (when-let [input (System/getenv "AUDIO_LOOPER_SCRAPE_NOISE_WAV")]
+    (let [wave (wav/read! input)
+          duration (/ (:frames wave) 44100.0)
+          _ (verify! "noise-only fixture is bounded stereo 44.1 kHz"
+                     (and (= 44100 (:rate wave)) (= 2 (:channels wave)) (<= 1 duration 30)))
+          result (perform! {:input input :duration duration :capacity 1 :detect? false} [])]
+      (verify! "current FX100 noise-only capture does not trigger"
+               (not-any? #(= :scrape (:type %)) (:events result)))
+      (println "PASS current FX100 noise-only recording: no detections"))))
+
+
 (defn- check-assets!
   []
   (let [cache (voice/prepare! #{} nil)
@@ -407,5 +482,7 @@
       (check-playback-cancel! owner)
       (check-scrape! owner)
       (check-recorded-scrapes!)
+      (check-current-scrape-recording!)
       (check-scrape-rearm! owner)
+      (check-scrape-level-gate! owner)
       (finally (voice/close! owner)))))

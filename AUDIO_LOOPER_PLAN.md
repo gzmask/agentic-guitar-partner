@@ -61,8 +61,14 @@ The Csound detector in `audio_looper/scrape.jolt` compares 24 normalized
 low-E scrapes with varied speed, force, and contact position on the user's
 FX100/pickup/preset chain. No captured PCM is stored in the repository. It uses
 a 2048-sample Hann window, 441-sample hop, an approximately 0.8-second noise
-calibration, a 0.90 match threshold, a 10 dB signal-to-noise gate,
-spectral-shape guards and eight matching frames with bounded gaps. A recognized
+calibration, a 0.90 match threshold, spectral-shape guards and eight matching
+frames with bounded gaps. An 80-frame/121-bin rolling histogram estimates the
+20th-percentile level; after warmup only lower estimates may update the floor.
+This recovers after startup activity followed by quiet, without tracking guitar
+tails upward as background. The level gate opens at noise +6 dB (minimum
+-100 dBFS), holds until 3 dB below that opening threshold, and is independent of
+the unchanged spectral confirmation. The dashboard requests muted strings during
+warmup; changed presets/gain need a fresh startup calibration. A recognized
 gesture stays latched until the spectral match has been absent for 120 ms and
 the 650 ms cooldown has elapsed. Ordinary playing may release the match; full
 input silence is not required. A detection
@@ -81,15 +87,17 @@ an estimate and may precede physical string contact. Failed detections remain in
 the recording, and false detections can stop it early. This six-example
 fingerprint covers the recorded variations but remains experimental and is not
 validated across guitars, tones, levels, normal playing, or hardware. `[d]`
-exposes match, level, and noise. No new service, audio process, per-block host
-DSP, or live input was added by this change.
+exposes match, level, noise, actual gate threshold/state, warmup progress, hits
+and native detection count on dedicated rows, including in the 80x24 dashboard.
+These scalar diagnostics do not acknowledge or accept commands. No new service,
+audio process, or per-block host DSP was added.
 
 Offline verification includes six generated positive fixtures based on the
 measured profiles, inverted stereo channels, a pitched negative, broadband
 noise, ring/correlation and pending-ack checks, queued-playback
 cancellation/race handling, and PCM preservation. Separately, the six real
-FX100 scrapes are re-evaluated offline from `/tmp`: the restored pre-`038036a`
-detector recognizes 6/6 once each, with no extra detections in that recording.
+FX100 scrapes are re-evaluated offline from `/tmp`: the current detector still
+recognizes 6/6 once each, with no extra detections in that recording.
 Set `AUDIO_LOOPER_SIX_SCRAPES_WAV` to that original 18.7-second capture to include
 the labeled recording regression in the offline suite. It is not committed PCM
 and does not establish generalization or a real-world false-positive rate.
@@ -101,8 +109,23 @@ Generated tests now require a fresh scrape after a non-quiet pitched interlude
 and one event for a sustained gesture. Spectral lookalikes are not labeled
 negative solely because they are short. The earlier over-sensitivity report
 remains unresolved; future tightening needs labeled real false-trigger audio as
-well as the known positives. **This restoration has passed offline regression
-checks but has not yet been revalidated in the live looper.**
+well as the known positives.
+
+A subsequent 18.51-second current-FX100 capture reproduced zero detections even
+after that rollback. Near 12.3/14.6 seconds its clear scrape shapes reached 0.95,
+but the old +10 dB per-frame gate accepted zero/three frames, fewer than eight.
+Its RMS-based noise update also rose from about -63 dBFS toward -60 dBFS during
+playing. The rolling-percentile floor and +6/+3 dB hysteresis fix those measured
+failures without changing the fingerprint, score threshold or hit count.
+`AUDIO_LOOPER_CURRENT_SCRAPES_WAV` enables that recording regression, including
+native recorder-ID correlation and the real event driving host finalization at
+its onset. Both clear scrapes are detected; the normal-note opening is rejected.
+The weak 8.9-second transient is not treated as a required positive or used to
+justify weakening the spectral matcher. `AUDIO_LOOPER_SCRAPE_NOISE_WAV` enables
+the preceding 9.05-second noise-only recording, which produces zero detections.
+Generated checks cover noise recovery after startup playing, no upward learning
+of music and hysteretic envelope release. **All these checks are offline; the
+updated full live-looper flow still requires hardware validation.**
 
 The compact command grammar is wake → slot → wait for default recording,
 wake → slot → 2 for playback, wake → slot → 3 for erase, wake → slot → scrape

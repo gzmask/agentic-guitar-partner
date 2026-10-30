@@ -137,4 +137,9 @@
                  :cents (native/control instance "pitch/cents") :gate? (pos? (native/control instance "pitch/gate"))}
          :scrape {:score (native/control instance "scrape/score")
                   :db (native/control instance "scrape/db")
-                  :noise (native/control instance "scrape/noise")}}))))
+                  :noise (native/control instance "scrape/noise")
+                  :threshold (native/control instance "scrape/threshold")
+                  :gate? (pos? (native/control instance "scrape/gate"))
+                  :calibration (long (native/control instance "scrape/calibration"))
+                  :hits (long (native/control instance "scrape/hits"))
+                  :detections (long (native/control instance "scrape/detections"))}}))))

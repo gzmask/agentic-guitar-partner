@@ -167,7 +167,10 @@
   []
   (let [channels (atom {"engine/clock" 110000 "e/write" 1 "engine/fatal" 0 "h/ack" 0
                         "ev/1/seq" 1 "ev/1/type" 12 "ev/1/sample" 110000
-                        "ev/1/id" 7 "ev/1/slot" 1 "ev/1/a" 101000 "ev/1/b" 0.95})
+                        "ev/1/id" 7 "ev/1/slot" 1 "ev/1/a" 101000 "ev/1/b" 0.95
+                        "scrape/score" 0.95 "scrape/db" -55 "scrape/noise" -64
+                        "scrape/threshold" -58 "scrape/gate" 1 "scrape/calibration" 80
+                        "scrape/hits" 3 "scrape/detections" 2})
         running {:instance :fake :transport (atom {:event-seq 0 :next-seq 1 :in-flight nil :queue []})}]
     (with-redefs [native/check-health! (fn [_] nil)
                   native/control (fn [_ channel] (get @channels channel 0))
@@ -184,6 +187,9 @@
         (verify! "scrape decodes recorder id and onset before ring acknowledgement"
                  (and (= 1 (get @channels "e/ack")) (= 7 (:operation-id event))
                       (= 101000 (:onset-sample event))))
+        (verify! "scrape diagnostics preserve the native gate and detection count"
+                 (= {:score 0.95 :db -55 :noise -64 :threshold -58 :gate? true
+                     :calibration 80 :hits 3 :detections 2} (:scrape snapshot)))
         (verify! "scrape transport requests finalization at the gesture onset"
                  (and (= :record-finalize (:type (first effects)))
                       (= 101000 (get-in state [:slots 0 :pending :boundary-sample]))

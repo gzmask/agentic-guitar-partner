@@ -96,9 +96,17 @@ armed recording.
 The experimental scrape recognizer uses an aggregated spectral fingerprint from
 six low-E scrapes with varied speed, force, and contact position through the
 same FX100/pickup/preset chain. It is not a general classifier or pitch
-recognizer. It calibrates input noise over the first ~0.8 seconds; different
-guitars, effects, levels, or normal playing can still cause missed or false
-triggers. `[d]` displays its current match and noise level. A recognized gesture
+recognizer. Keep the strings muted during the initial ~0.8-second noise
+calibration; the dashboard shows progress. A rolling lower-percentile estimate
+can recover after a quieter interval but never learns playing as a higher noise
+floor. The level gate opens 6 dB above that floor and holds down to 3 dB above it,
+so a weak scrape's envelope dips do not discard otherwise matching frames.
+The 0.90 fingerprint match, spectral-shape guards and eight-hit confirmation are
+unchanged. Different guitars, effects, levels, or normal playing can still cause
+missed or false triggers. If the preset/gain changes, restart for fresh calibration.
+`[d]` shows match, level, noise, actual gate threshold/state, hit count and native
+detection count on separate lines. A rising native count confirms classifier
+output, not that the current command context accepted an action. A recognized gesture
 stays latched until its spectral match has been absent for 120 ms and the 650 ms
 cooldown has elapsed. Ordinary guitar playing can release the match; you do not
 need to silence the input before a fresh scrape. Short/quiet intentional scrapes
@@ -230,7 +238,9 @@ session save/reload (every retained stereo sample), atomic failure recovery,
 invalid-file/lock rejection, the native `pitchamdf` lifecycle, and the native scrape recognizer against six
 synthetic profile fixtures plus negative tone/noise fixtures. It also checks
 fresh scrapes after ordinary playing, sustained-gesture deduplication, local-time
-names and legacy session compatibility. It opens no audio device.
+names and legacy session compatibility. Noise-recovery, music-resistant noise
+estimation and level-gate hysteresis also have generated regressions. It opens
+no audio device.
 
 When the original 18.7-second six-scrape FX100 recording is available outside git,
 include its labeled recording regression (all six, once each, no extras):
@@ -239,6 +249,13 @@ include its labeled recording regression (all six, once each, no extras):
 AUDIO_LOOPER_SIX_SCRAPES_WAV=/tmp/low-e-scrapes-6.wav \
   jolt guitar-audio-looper.jolt --check-engine
 ```
+
+The additional opt-in `AUDIO_LOOPER_CURRENT_SCRAPES_WAV` fixture is the labeled
+18.51-second FX100 failure recording (clear scrapes near 12.3/14.6 seconds, normal
+notes near the beginning). `AUDIO_LOOPER_SCRAPE_NOISE_WAV` selects the earlier
+9.05-second noise-only capture. These recordings stay outside git; their checks
+run only when explicitly selected. The ambiguous weak 8.9-second transient is
+not forced into a command by weakening the spectral matcher.
 
 Static development checks:
 

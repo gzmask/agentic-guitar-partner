@@ -184,11 +184,26 @@
                         (assoc :active-recorder 1)
                         (assoc-in [:slots 0 :record-state] :recording)
                         (assoc-in [:slots 0 :start-sample] 0))
-          view (dashboard/view recording (assoc context :debug? true
-                                                 :scrape {:score 0.94 :db -55.0 :noise -90.0}))
+          view (dashboard/view recording (assoc context :debug? true :columns 80 :rows 24
+                                                 :scrape {:score 0.94 :db -55.0 :noise -64.0
+                                                          :threshold -58.0 :gate? true :calibration 80
+                                                          :hits 3 :detections 2}))
           output (dashboard/render view)]
+      (let [calibrating (dashboard/view (control/initial-state)
+                                       (assoc context :scrape {:score 0 :db -70 :noise -75
+                                                               :calibration 40}))]
+        (verify! "startup shows a mute-strings instruction until noise calibration completes"
+                 (str/includes? (:instruction calibrating) "keep strings muted (40/80)")))
       (verify! "recording shows direct scrape stop" (str/includes? output "Scrape low E to stop"))
       (verify! "debug shows scrape score" (str/includes? output "Scrape match=0.94"))
+      (doseq [text ["noise=-64.0" "gate=-58.0" "native=2" "cal=80/80" "Keyboard" "EVENTS"]]
+        (verify! (str "compact debug keeps visible scrape diagnostics: " text)
+                 (str/includes? output text)))
+      (let [waiting (assoc-in (control/initial-state) [:parser :phase] :wait-loop)
+            compact (dashboard/render (assoc view :phase "WAIT_LOOP" :options (control/navigation waiting)))]
+        (doseq [text ["C4  select loop" "A4  select loop" "native=2" "Keyboard" "EVENTS"]]
+          (verify! (str "six-selector compact debug keeps menu and footer: " text)
+                   (str/includes? compact text))))
       (let [[renderer _] (dashboard/plan (dashboard/renderer false) view 0)
             [_ line] (dashboard/plan renderer (assoc view :scrape "Scrape match=0.95") 100)]
         (verify! "plain debug output shows updated scrape score" (str/includes? line "Scrape match=0.95"))))
