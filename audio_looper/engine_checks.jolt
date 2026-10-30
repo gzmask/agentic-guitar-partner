@@ -337,6 +337,43 @@
     (println "PASS six-profile Csound scrape recognition, stereo power, correlation and negatives")))
 
 
+(defn- check-scrape-timing!
+  [owner]
+  (let [sound (scrape-expression scrape/template)
+        short-wave (str/join "+"
+                             (map-indexed
+                               (fn [index duration]
+                                 (let [start (+ 1.5 index)]
+                                   (str "if(between(t," start "," (+ start duration) "),(" sound "),0)")))
+                               [0.02 0.04 0.06 0.08 0.10 0.12]))
+        short (generate! owner "scrape-short-negatives.wav" (str short-wave "|" short-wave) 8)
+        options {:input short :duration 8 :capacity 1 :detect? false}
+        short-result (perform! options [])
+        matches #(filter (fn [event] (= :scrape (:type event))) (:events %))
+        pulse-wave (str "if(between(t,1.5,3.0)*lt(mod(t-1.5,0.14),0.06),(" sound "),0)")
+        pulses (generate! owner "scrape-fragmented.wav" (str pulse-wave "|" pulse-wave) 4)
+        pulse-result (perform! (assoc options :input pulses :duration 4) [])
+        prefix-wave (str "if(between(t,1.5,1.56)+between(t,1.75,2.15),(" sound "),0)")
+        prefix (generate! owner "scrape-prefix.wav" (str prefix-wave "|" prefix-wave) 3)
+        prefix-matches (matches (perform! (assoc options :input prefix :duration 3) []))
+        held-wave (str "if(between(t,1.5,1.9)+between(t,2.6,3.0)+between(t,3.8,4.2),("
+                       sound "),if(between(t,1.9,2.6),0.1*sin(2*PI*220*t),0))")
+        held (generate! owner "scrape-release.wav" (str held-wave "|" held-wave) 5)
+        held-result (perform! (assoc options :input held :duration 5) [])]
+    (verify! "20..120ms spectral lookalikes cannot trigger a scrape"
+             (empty? (matches short-result)))
+    (verify! "separate 60ms bursts cannot accumulate into a sustained gesture"
+             (empty? (matches pulse-result)))
+    (verify! "a rejected short prefix cannot backdate a later gesture's stop boundary"
+             (and (= 1 (count prefix-matches))
+                  (<= (* 1.70 44100) (:onset-sample (first prefix-matches)) (* 1.82 44100))
+                  (>= (- (:sample (first prefix-matches)) (:onset-sample (first prefix-matches)))
+                      7938)))
+    (verify! "pitch change alone cannot rearm; actual quiet permits a fresh scrape"
+             (= [1 3] (mapv #(quot (:onset-sample %) 44100) (matches held-result))))
+    (println "PASS scrape minimum duration, burst rejection, fresh onset and quiet-only rearm")))
+
+
 (defn- check-assets!
   []
   (let [cache (voice/prepare! #{} nil)
@@ -367,4 +404,5 @@
       (check-detector! owner)
       (check-playback-cancel! owner)
       (check-scrape! owner)
+      (check-scrape-timing! owner)
       (finally (voice/close! owner)))))

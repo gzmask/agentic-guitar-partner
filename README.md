@@ -98,7 +98,12 @@ six low-E scrapes with varied speed, force, and contact position through the
 same FX100/pickup/preset chain. It is not a general classifier or pitch
 recognizer. It calibrates input noise over the first ~0.8 seconds; different
 guitars, effects, levels, or normal playing can still cause missed or false
-triggers. `[d]` displays its current match and noise level.
+triggers. `[d]` displays its current match and noise level. A command now requires
+at least 180 ms of sustained spectral evidence (16 hits, at least 80% matching
+frames within a bounded 250 ms candidate), not just a brief matching attack.
+Use a deliberate roughly quarter-second-or-longer scrape; very short or quiet
+scrapes may intentionally be ignored. Rearming requires 120 ms of actual input
+quiet as well as a 650 ms cooldown; merely changing to a pitched note is not release.
 
 On a recognized scrape, finalization uses its estimated onset, not the later
 recognition time. The onset is an analysis-window estimate, not a guarantee of

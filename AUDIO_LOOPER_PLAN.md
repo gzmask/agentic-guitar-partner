@@ -56,8 +56,13 @@ The Csound detector in `audio_looper/scrape.jolt` compares 24 normalized
 low-E scrapes with varied speed, force, and contact position on the user's
 FX100/pickup/preset chain. No captured PCM is stored in the repository. It uses
 a 2048-sample Hann window, 441-sample hop, an approximately 0.8-second noise
-calibration, a 0.90 match threshold, a 10 dB signal-to-noise gate,
-spectral-shape guards and 8 matching frames with bounded gaps. A detection
+calibration, a 0.90 match threshold and a 12 dB signal-to-noise gate. In addition
+to spectral-shape guards, each candidate needs at least 180 ms of analysis-frame
+time, 16 matching frames and 80% matching occupancy. Candidates expire after
+250 ms or a gap over 40 ms (with one 32-sample block of alignment tolerance), so
+separate brief matches cannot accumulate indefinitely. Duration is not measured
+from the backdated FFT onset. Rearming requires 120 ms of actual input quiet
+and the existing 650 ms cooldown; a pitch/spectrum change is not release. A detection
 emits the estimated first matching window onset through the existing sequenced
 event ring, with a native recorder ID when one is active. In recording state,
 the gesture cancels an arm or requests finalization without wake. After wake it
@@ -80,10 +85,15 @@ Offline verification includes six generated positive fixtures based on the
 measured profiles, inverted stereo channels, a pitched negative, broadband
 noise, ring/correlation and pending-ack checks, queued-playback
 cancellation/race handling, and PCM preservation. Separately, the six real
-FX100 scrapes used to tune it were evaluated offline from `/tmp`; they are
-neither committed fixtures nor a substitute for testing false positives and
-generalization. **The updated production Csound integration has not yet been
-revalidated in the live looper after this six-scrape calibration.**
+FX100 scrapes were re-evaluated offline from `/tmp`: the conservative duration/
+continuity gate now accepts 3/6, intentionally giving up short/quiet captures
+rather than relaxing safety thresholds to force 6/6. They are neither committed
+fixtures nor a substitute for testing false positives and generalization.
+Regression negatives include 20–120 ms exact-template lookalikes and repeated
+60 ms bursts; a rejected prefix must not backdate a later valid gesture. A
+non-quiet pitched interlude must not rearm, while actual quiet permits a new
+command. **The updated production Csound integration has not yet been
+revalidated in the live looper after this temporal tightening.**
 
 The compact command grammar is wake → slot → wait for default recording,
 wake → slot → 2 for playback, wake → slot → 3 for erase, wake → slot → scrape
