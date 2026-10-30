@@ -98,12 +98,11 @@ six low-E scrapes with varied speed, force, and contact position through the
 same FX100/pickup/preset chain. It is not a general classifier or pitch
 recognizer. It calibrates input noise over the first ~0.8 seconds; different
 guitars, effects, levels, or normal playing can still cause missed or false
-triggers. `[d]` displays its current match and noise level. A command now requires
-at least 180 ms of sustained spectral evidence (16 hits, at least 80% matching
-frames within a bounded 250 ms candidate), not just a brief matching attack.
-Use a deliberate roughly quarter-second-or-longer scrape; very short or quiet
-scrapes may intentionally be ignored. Rearming requires 120 ms of actual input
-quiet as well as a 650 ms cooldown; merely changing to a pitched note is not release.
+triggers. `[d]` displays its current match and noise level. A recognized gesture
+stays latched until its spectral match has been absent for 120 ms and the 650 ms
+cooldown has elapsed. Ordinary guitar playing can release the match; you do not
+need to silence the input before a fresh scrape. Short/quiet intentional scrapes
+remain supported by the original matching policy.
 
 On a recognized scrape, finalization uses its estimated onset, not the later
 recognition time. The onset is an analysis-window estimate, not a guarantee of
@@ -229,9 +228,17 @@ sequenced native transport, every recorded stereo PCM sample, arbitrary sample
 boundaries, silence trim, six-slot mixing, capacity handling, prompt playback,
 session save/reload (every retained stereo sample), atomic failure recovery,
 invalid-file/lock rejection, the native `pitchamdf` lifecycle, and the native scrape recognizer against six
-synthetic profile fixtures plus negative tone/noise, short-attack and interrupted-burst
-fixtures. It also checks quiet-only rearming, local-time names and legacy session
-compatibility. It opens no audio device.
+synthetic profile fixtures plus negative tone/noise fixtures. It also checks
+fresh scrapes after ordinary playing, sustained-gesture deduplication, local-time
+names and legacy session compatibility. It opens no audio device.
+
+When the original 18.7-second six-scrape FX100 recording is available outside git,
+include its labeled recording regression (all six, once each, no extras):
+
+```bash
+AUDIO_LOOPER_SIX_SCRAPES_WAV=/tmp/low-e-scrapes-6.wav \
+  jolt guitar-audio-looper.jolt --check-engine
+```
 
 Static development checks:
 

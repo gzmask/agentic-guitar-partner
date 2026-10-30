@@ -33,8 +33,6 @@ instr 11
   knoise init -90
   kcal init 0
   khits init 0
-  kframes init 0
-  kbegin init -1
   kfirst init -1
   klast init -1
   klatched init 0
@@ -104,9 +102,10 @@ instr 11
         kg = kg+1
       od
       kscore = kdot/max(sqrt(knorm), 0.00000000000000000001)
-      ; Spectral similarity alone is not a command. Prefer missed short/quiet
-      ; gestures over allowing an incidental attack to stop or exit the looper.
-      kgood = (kscore >= 0.90 && kdb >= max(-100,knoise+12) && kflat >= 0.02 && kentropy >= 0.48 && kweighted/max(ksum,0.00000000000000000001) >= 400 && khigh/max(ksum,0.00000000000000000001) >= 0.03 ? 1 : 0)
+      ; Six varied captures include a quieter, shorter scrape. Ten dB above the
+      ; calibrated floor plus eight matching 10 ms hops keeps that gesture while
+      ; still requiring the spectral-shape guards and a sustained match.
+      kgood = (kscore >= 0.90 && kdb >= max(-100,knoise+10) && kflat >= 0.02 && kentropy >= 0.48 && kweighted/max(ksum,0.00000000000000000001) >= 400 && khigh/max(ksum,0.00000000000000000001) >= 0.03 ? 1 : 0)
       chnset kscore, \"scrape/score\"
       chnset kdb, \"scrape/db\"
       chnset knoise, \"scrape/noise\"
@@ -117,9 +116,7 @@ instr 11
         endif
       endif
       if klatched == 1 then
-        ; A different spectrum is not release. Require actual input quiet for
-        ; 120 ms, as well as the existing 650 ms cooldown, before rearming.
-        if kdb >= max(-100,knoise+6) then
+        if kgood == 1 then
           kreleased = -1
         elseif kreleased < 0 then
           kreleased = gkClock
@@ -127,31 +124,19 @@ instr 11
           klatched = 0
         endif
       else
-        ; Bound each candidate to 250 ms and at most 40 ms between matches
-        ; (one 32-sample block of tolerance for FFT-hop/block alignment).
-        if kbegin >= 0 then
-          if gkClock-kbegin > 11025 || gkClock-klast > 1796 then
-            khits = 0
-            kframes = 0
-            kbegin = -1
-            kfirst = -1
-            klast = -1
-          endif
-        endif
         if kgood == 1 then
-          if kbegin < 0 then
-            kbegin = gkClock
+          if kfirst < 0 then
             kfirst = max(0, gkClock-2048)
+            khits = 0
           endif
           khits = khits+1
           klast = gkClock
+        elseif klast >= 0 && gkClock-klast > 1764 then
+          khits = 0
+          kfirst = -1
+          klast = -1
         endif
-        if kbegin >= 0 then
-          kframes = kframes+1
-        endif
-        ; Time is measured from the analysis frame, NOT its backdated onset.
-        ; At least 180 ms, 16 hits and 80% occupancy are all required together.
-        if kgood == 1 && kbegin >= 0 && gkClock-kbegin >= 7938 && khits >= 16 && khits >= 0.8*kframes then
+        if khits >= 8 then
           if krecording == 1 then
             Emit 12, gkClock, gkRecId[gkRecSlot], gkRecSlot+1, kfirst, kscore, 0, 0, 0
           else
@@ -159,10 +144,7 @@ instr 11
           endif
           klatched = 1
           kcooldown = gkClock+28665
-          kreleased = -1
           khits = 0
-          kframes = 0
-          kbegin = -1
           kfirst = -1
           klast = -1
         endif
