@@ -99,6 +99,7 @@
          :load-track (ffi/foreign-fn "looperLoadTrack" [:pointer :int :pointer :int] :int :blocking)
          :save-track (ffi/foreign-fn "looperSaveTrack"
                                     [:pointer :int :pointer :int :int] :int :blocking)
+         :playback-gain (ffi/foreign-fn "looperTrackPlaybackGain" [:pointer :int :int :int] :double :blocking)
          :format-local-time (ffi/foreign-fn "looperFormatLocalTime" [:long :pointer :int] :int)
          :session-lock (ffi/foreign-fn "looperSessionLock" [:pointer] :int :blocking)
          :session-unlock (ffi/foreign-fn "looperSessionUnlock" [:int] :void)
@@ -366,6 +367,22 @@
           (when-not (zero? code)
             (fail! :persistence "Cannot save stereo PCM track." {:file path :code code}))))))
   nil)
+
+
+(defn playback-gain!
+  "Bounded host-thread measurement, never per-block DSP. The caller must own an
+  immutable finalized/loaded clip until return; the same gain covers L/R."
+  [instance slot offset frames]
+  (locking instance
+    (let [{:keys [api diagnostics phase]} (usable! instance)]
+      (when-not (and (#{:started :performing} phase) (integer? slot) (<= 1 slot 6)
+                     (integer? offset) (<= 0 offset 5292000)
+                     (integer? frames) (<= 1 frames 5292000))
+        (fail! :playback-gain "Invalid immutable clip measurement." {}))
+      (let [gain ((:playback-gain api) diagnostics (dec slot) offset frames)]
+        (when-not (<= 1.0 gain 16.0)
+          (fail! :playback-gain "Cannot measure playback makeup gain." {:code gain}))
+        gain))))
 
 
 (defn local-timestamp

@@ -78,6 +78,60 @@
     (println "PASS actual PCM: every stereo sample, unaligned boundaries, trim, seam/start/stop ramps, erase")))
 
 
+(defn- playback-gain!
+  "Exercise the real host enqueue path after native finalization, without audio.
+  The finished worker is deliberately not polled again to execute this queue."
+  [options]
+  (let [running (engine/open! options)]
+    (try
+      (native/await! (:instance running) 30000)
+      (engine/poll! running)
+      (engine/enqueue! running {:type :playback-start :loop-id 1 :id 99 :at-sample 20000})
+      (:arg (first (:queue @(:transport running))))
+      (finally (engine/close! running)))))
+
+
+(defn- check-playback-level!
+  [owner]
+  (let [input (generate! owner "quiet-performance.wav"
+                         "if(lt(t,0.14),0.02*sin(2*PI*220*t),0.9)|if(lt(t,0.14),0.01*sin(2*PI*370*t),-0.9)" 0.5)
+        source (wav/read! input)
+        prefix [{:type :record-start :sample 0 :at-sample 147}
+                {:type :record-finalize :sample 6500 :length-samples 6000}]
+        options {:input input :duration 0.2 :capacity 8192 :detect? false :operations prefix}
+        gain (playback-gain! options)]
+    (verify! "quiet music receives bounded +24dB playback-only makeup gain" (and (number? gain) (== 16 gain)))
+    (let [result (perform! (assoc options :duration 0.5
+                                  :output (.getPath (io/file (:directory @owner) "boosted-performance.wav"))
+                                  :operations (into prefix
+                                                    [{:type :playback-start :sample 7000 :at-sample 8007 :arg gain}
+                                                     {:type :playback-stop :sample 16000 :at-sample 16503}]))
+                           [[100 0 6000] [101 0 6000]])]
+      (doseq [channel (range 2) frame (range 6000)]
+        (verify! "makeup gain never changes recorded stereo PCM"
+                 (== (wav/sample source (+ 147 frame) channel) (get-in result [:tables channel frame]))))
+      (doseq [channel (range 2) frame (range 500 5500)]
+        (verify! "one constant gain preserves stereo balance and every interior playback sample"
+                 (near? (* gain 0.65 (wav/sample source (+ 147 frame) channel))
+                        (wav/sample (:wave result) (+ 8007 frame) channel))))
+      (verify! "boosted playback stays below the limiter" (< (:peak result) 0.3)))
+    (doseq [[name expression expected]
+            [["moderate" "0.1|0.05" 5]
+             ["full-scale" "0.99|-0.99" 1]
+             ["silence" "0|0" 1]
+             ["noise-floor" "0.0001|-0.0001" 1]
+             ["noise-click" "if(lt(t,0.0035),0.02,0.0001)|if(lt(t,0.0035),-0.02,-0.0001)" 1]]]
+      (let [input (generate! owner (str "playback-" name ".wav") expression 0.3)
+            gain (playback-gain! (assoc options :input input))]
+        (verify! (str name " has safe playback gain") (and (number? gain) (near? expected gain)))))
+    (doseq [bad-gain [0.5 17]]
+      (verify! "native playback rejects makeup gains outside its safety bounds"
+               (try (perform! (assoc options :operations
+                                     (conj prefix {:type :playback-start :sample 7000 :at-sample 8007 :arg bad-gain})) [])
+                    false (catch Exception error (= :engine-error (:type (ex-data error)))))))
+    (println "PASS playback-only makeup gain, raw PCM preservation, stereo balance and silence/full-scale safety")))
+
+
 (defn- check-silence-trim!
   [owner]
   (let [input (generate! owner "trim.wav"
@@ -100,32 +154,34 @@
 
 (defn- check-six!
   [owner]
-  (let [input (generate! owner "full-scale.wav" "0.99|-0.99" 0.4)
-        operations (vec (concat
-                          (mapcat (fn [i] [{:type :record-start :sample (* i 900) :loop-id (inc i)
-                                             :at-sample (+ (* i 900) 147)}
-                                            {:type :record-finalize :sample (+ (* i 900) 720)
-                                             :loop-id (inc i) :length-samples 512}]) (range 6))
-                          (for [i (range 6)] {:type :playback-start :sample (+ 6000 (* i 96))
-                                             :loop-id (inc i) :at-sample 8007})
-                          (for [i (range 6)] {:type :playback-stop :sample (+ 10000 (* i 96))
-                                             :loop-id (inc i) :at-sample 12019})
-                          [{:type :buffer-erase :sample 13050 :loop-id 3}]))
-        result (perform! {:input input :output (.getPath (io/file (:directory @owner) "six.wav"))
-                          :duration 0.35 :capacity 4096 :detect? false :monitor? true :operations operations} [])
-        starts (filter #(= :playback-started (:type %)) (:events result))
-        stops (filter #(= :playback-stopped (:type %)) (:events result))]
-    (verify! "six simultaneous native players" (= 6 (count starts)))
-    (verify! "all shared-boundary starts are exact" (every? #(= 8007 (:sample %)) starts))
-    (verify! "all shared-boundary stops are exact" (every? #(= 12019 (:at-sample %)) stops))
-    (verify! "event timestamps stay monotonic across six local sample clocks"
-             (apply <= (map :sample (:events result))))
-    (verify! "erasing slot three retains the other five" (= [512 512 0 512 512 512] (:lengths result)))
-    (verify! "coherent full-scale layers cannot clip" (< (:peak result) 0.96))
-    (verify! "stereo is not collapsed by mixing"
-             (and (near? (* 0.99 (+ 0.3 0.65)) (wav/sample (:wave result) 9000 0))
-                  (near? (* -0.99 (+ 0.3 0.65)) (wav/sample (:wave result) 9000 1))))
-    (println "PASS six native slots: exact common boundaries, stereo mix headroom, isolated erase")))
+  (doseq [[name amplitude gain] [["full-scale" 0.99 1] ["quiet-six" 0.02 16]]]
+    (let [input (generate! owner (str name ".wav") (str amplitude "|-" amplitude) 0.4)
+          operations (vec (concat
+                            (mapcat (fn [i]
+                                      [{:type :record-start :sample (* i 900) :loop-id (inc i)
+                                        :at-sample (+ (* i 900) 147)}
+                                       {:type :record-finalize :sample (+ (* i 900) 720)
+                                        :loop-id (inc i) :length-samples 512}]) (range 6))
+                            (for [i (range 6)] {:type :playback-start :sample (+ 6000 (* i 96))
+                                                :loop-id (inc i) :at-sample 8007 :arg gain})
+                            (for [i (range 6)] {:type :playback-stop :sample (+ 10000 (* i 96))
+                                                :loop-id (inc i) :at-sample 12019})
+                            [{:type :buffer-erase :sample 13050 :loop-id 3}]))
+          result (perform! {:input input :output (.getPath (io/file (:directory @owner) "six.wav"))
+                            :duration 0.35 :capacity 4096 :detect? false :monitor? true :operations operations} [])
+          starts (filter #(= :playback-started (:type %)) (:events result))
+          stops (filter #(= :playback-stopped (:type %)) (:events result))]
+      (verify! "six simultaneous native players" (= 6 (count starts)))
+      (verify! "all shared-boundary starts are exact" (every? #(= 8007 (:sample %)) starts))
+      (verify! "all shared-boundary stops are exact" (every? #(= 12019 (:at-sample %)) stops))
+      (verify! "event timestamps stay monotonic across six local sample clocks"
+               (apply <= (map :sample (:events result))))
+      (verify! "erasing slot three retains the other five" (= [512 512 0 512 512 512] (:lengths result)))
+      (verify! "coherent full-scale layers cannot clip" (< (:peak result) 0.96))
+      (verify! "stereo is not collapsed by mixing"
+               (and (near? (* amplitude (+ 0.3 (* gain 0.65))) (wav/sample (:wave result) 9000 0))
+                    (near? (* (- amplitude) (+ 0.3 (* gain 0.65))) (wav/sample (:wave result) 9000 1))))))
+  (println "PASS six native slots: full-scale/boosted mix headroom, exact boundaries, stereo and isolated erase"))
 
 
 (defn- check-capacity!
@@ -474,6 +530,7 @@
   (let [owner (voice/prepare! #{} nil)]
     (try
       (check-pcm! owner)
+      (check-playback-level! owner)
       (check-silence-trim! owner)
       (check-six! owner)
       (check-capacity! owner)

@@ -37,6 +37,7 @@ gkLength[] fillarray __LENGTHS__
 gkOffset[] init 6
 gkPlay[] init 6
 gkPlayStart[] init 6
+gkPlayGain[] init 6
 gkPlayAt[] init 6
 gkPlayNext[] init 6
 gkPlayId[] init 6
@@ -165,9 +166,14 @@ instr 2
         gkFatal = 3
       elseif kat < gkClock || kat != int(kat) then
         gkFatal = 4
-      elseif (kop == 4 && gkPlay[kslot] != 0) || (kop == 5 && gkPlay[kslot] != 1) then
+      elseif (kop == 4 && gkPlay[kslot] != 0) || (kop == 5 && gkPlay[kslot] != 1) || (kop == 4 && karg != 0 && (karg < 1 || karg > 16)) then
         gkFatal = 3
       else
+        if kop == 4 then
+          ; Constant stereo makeup gain shares the sequenced playback command.
+          ; Zero retains unity for raw-PCM native fixtures.
+          gkPlayGain[kslot] = (karg == 0 ? 1 : karg)
+        endif
         gkPlayAt[kslot] = kat
         gkPlayNext[kslot] = kop - 3
         gkPlayId[kslot] = kid
@@ -347,8 +353,8 @@ opcode Slot, aaa, aai
     ; seam, unchanged period and unchanged interior PCM. No resynthesis.
     kfade = min(220, max(1, floor(klen/2)))
     kblend = 0.5 * max(0, 1-min(krelative, klen-1-krelative)/kfade)
-    koutL = (krawL*(1-kblend) + ktailL*kblend) * kw
-    koutR = (krawR*(1-kblend) + ktailR*kblend) * kw
+    koutL = (krawL*(1-kblend) + ktailL*kblend) * kw * gkPlayGain[islot]
+    koutR = (krawR*(1-kblend) + ktailR*kblend) * kw * gkPlayGain[islot]
   endif
   aoutL = koutL
   aoutR = koutR

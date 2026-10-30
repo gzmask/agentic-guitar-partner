@@ -125,10 +125,16 @@
                         "ev/1/id" 9 "ev/1/slot" 2 "ev/1/a" 90
                         "ev/1/b" 0 "ev/1/c" 0 "ev/1/d" 0 "ev/1/e" 0})
         writes (atom [])
+        measurements (atom [])
         running {:instance :fake
                  :transport (atom {:event-seq 0 :next-seq 1 :in-flight nil
-                                   :queue [] :held nil :last-note-id 0})}]
-    (with-redefs [native/check-health! (fn [_] nil)
+                                   :queue [] :held nil :last-note-id 0
+                                   :clips {2 {:offset-samples 73 :length-samples 6000}}
+                                   :playback-gains {2 12.5}})}]
+    (with-redefs [native/playback-gain! (fn [_ slot offset frames]
+                                          (swap! measurements conj [slot offset frames])
+                                          12.5)
+                  native/check-health! (fn [_] nil)
                   native/control (fn [_ channel] (get @channels channel 0))
                   native/set-control! (fn [_ channel value]
                                         (swap! writes conj [channel value])
@@ -145,7 +151,9 @@
         (verify! "host payload is published before its sequence"
                  (and (= ["h/seq" 1] (last host-writes))
                       (= 4 (get @channels "h/op")) (= 20 (get @channels "h/id"))
-                      (= 1 (get @channels "h/slot")) (= 9000 (get @channels "h/at")))))
+                      (= 1 (get @channels "h/slot")) (= 9000 (get @channels "h/at"))
+                      (= 12.5 (get @channels "h/arg")))))
+      (verify! "loaded gain never scans PCM on a timed playback request" (empty? @measurements))
       (engine/enqueue! running {:type :playback-stop :id 21 :loop-id 2 :at-sample 12000})
       (engine/poll! running)
       (verify! "unacknowledged host operation applies backpressure"
@@ -160,7 +168,25 @@
       (engine/poll! running)
       (verify! "playback cancellation transports the original operation ID"
                (and (= 3 (get @channels "h/seq")) (= 10 (get @channels "h/op"))
-                    (= 22 (get @channels "h/id")) (= 21 (get @channels "h/arg")))))))
+                    (= 22 (get @channels "h/id")) (= 21 (get @channels "h/arg"))))
+      (engine/enqueue! running {:type :playback-start :id 23 :loop-id 2 :at-sample 15000})
+      (verify! "immutable clip gain is cached across play requests" (empty? @measurements))
+      (engine/discard-queued! running)
+      (swap! channels merge {"e/write" 2 "ev/2/seq" 2 "ev/2/type" 8
+                             "ev/2/sample" 120 "ev/2/id" 24 "ev/2/slot" 2})
+      (engine/poll! running)
+      (verify! "native erase invalidates both retained range and cached gain"
+               (and (nil? (get-in @(:transport running) [:clips 2]))
+                    (nil? (get-in @(:transport running) [:playback-gains 2]))))
+      (swap! channels merge {"e/write" 3 "ev/3/seq" 3 "ev/3/type" 4
+                             "ev/3/sample" 140 "ev/3/id" 25 "ev/3/slot" 2
+                             "ev/3/a" 7000 "ev/3/b" 123 "slot/1/length" 7000})
+      (engine/poll! running)
+      (verify! "new finalization measures exactly its retained range before any timed play request"
+               (= [[2 123 7000]] @measurements))
+      (engine/enqueue! running {:type :playback-start :id 26 :loop-id 2 :at-sample 18000})
+      (verify! "new playback reuses the premeasured gain without spending scheduling lead"
+               (= [[2 123 7000]] @measurements)))))
 
 
 (defn- check-scrape-transport!

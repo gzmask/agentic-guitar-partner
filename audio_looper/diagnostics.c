@@ -188,6 +188,35 @@ int looperSaveTrack(void *context, int slot, const char *path, int offset, int f
     return result;
 }
 
+/* Host-thread analysis of an immutable finalized/loaded clip. One shared gain
+ * preserves stereo balance; neither table nor the persisted PCM is modified.
+ * Peak and RMS passes are bounded by the existing 120-second table capacity. */
+double looperTrackPlaybackGain(void *context, int slot, int offset, int frames) {
+    LooperDiagnostics *state = context;
+    if (state == NULL || slot < 0 || slot >= 6 || offset < 0 || frames < 1 ||
+        frames > state->capacity || offset > state->capacity - frames) return -1;
+    const double target_peak = 0.5;
+    const double maximum_gain = 16.0;
+    const double minimum_rms = 0.0031622776601683794; /* -50 dBFS */
+    double peak = 0.0;
+    for (int i = offset; i < offset + frames; ++i) {
+        double left = state->left[slot][i];
+        double right = state->right[slot][i];
+        if (!isfinite(left) || !isfinite(right)) return -2;
+        peak = fmax(peak, fmax(fabs(left), fabs(right)));
+    }
+    if (peak >= target_peak || peak < minimum_rms) return 1.0;
+    /* All samples are now known to be below 0.5, so this sum cannot overflow. */
+    double energy = 0.0;
+    for (int i = offset; i < offset + frames; ++i) {
+        double left = state->left[slot][i];
+        double right = state->right[slot][i];
+        energy += left * left + right * right;
+    }
+    if (sqrt(energy / (2.0 * frames)) < minimum_rms) return 1.0;
+    return fmin(maximum_gain, target_peak / peak);
+}
+
 /* Use libc's actual machine-local timezone (or explicit TZ override), not the
  * hosted runtime's UTC fallback. Caller owns the buffer; no shared tm/string. */
 int looperFormatLocalTime(long seconds, char *buffer, int bytes) {

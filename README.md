@@ -184,8 +184,16 @@ not automatically backed up or pruned.
 - Press Ctrl+C immediately if feedback, runaway level, or unexpected behavior
   occurs.
 
-The loop bus uses 0.65 gain and the FX100 software monitor uses 0.30. Concurrent
-loops are normalized before the final ±0.98 limiter.
+Quiet clips receive **playback-only makeup gain**, including clips loaded from
+older sessions; re-recording is not required. Each clip uses one constant stereo
+gain, targeting a 0.5 peak before the loop bus, capped at 16× (about +24 dB).
+Clips with stereo RMS below −50 dBFS are not boosted. Original PCM/WAVs,
+recognizer input, FX100 monitoring and spoken-prompt levels are unchanged. This
+cannot improve the recording's signal-to-noise ratio. Start with low output
+volume when trying the louder playback.
+
+The loop bus still uses 0.65 gain and the FX100 software monitor uses 0.30.
+Concurrent loops are normalized before the final ±0.98 limiter.
 
 ## Repository layout
 
@@ -239,8 +247,10 @@ invalid-file/lock rejection, the native `pitchamdf` lifecycle, and the native sc
 synthetic profile fixtures plus negative tone/noise fixtures. It also checks
 fresh scrapes after ordinary playing, sustained-gesture deduplication, local-time
 names and legacy session compatibility. Noise-recovery, music-resistant noise
-estimation and level-gate hysteresis also have generated regressions. It opens
-no audio device.
+estimation and level-gate hysteresis also have generated regressions. Playback
+makeup checks cover raw-sample preservation, stereo balance, exact retained-range
+measurement, cache invalidation/reload, silence/noise-floor/full-scale safety,
+and six coherent boosted loops with monitoring. It opens no audio device.
 
 When the original 18.7-second six-scrape FX100 recording is available outside git,
 include its labeled recording regression (all six, once each, no extras):
@@ -264,6 +274,10 @@ cljstyle check guitar-audio-looper.jolt audio_looper/*.jolt
 clj-kondo --cache false --lang clj --lint \
   guitar-audio-looper.jolt audio_looper/*.jolt
 ```
+
+The default `cljstyle` file filter skips `.jolt`. For an effective format check,
+copy touched forms to a temporary `.clj` file and check that file; a silent
+`.jolt` invocation alone is not a formatting pass.
 
 See [`AUDIO_LOOPER_PLAN.md`](AUDIO_LOOPER_PLAN.md) for the detailed
 architecture, invariants, and verification record.

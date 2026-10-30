@@ -120,6 +120,11 @@
             (let [events (:events (engine/poll! loaded))]
               (verify! "native restored track can play using the existing transport"
                        (some #(and (= :playback-started (:type %)) (= 3 (:loop-id %))) events)))
+            (engine/enqueue! loaded {:type :playback-start :id 99 :loop-id 1 :at-sample 3000})
+            (verify! "loaded raw WAVs receive playback-only makeup without a schema change"
+                     (< 1 (get-in @(:transport loaded) [:playback-gains 1]) 16))
+            (verify! "gain measurement rejects ranges outside the native table"
+                     (rejected? #(native/playback-gain! (:instance loaded) 1 4000 512)))
             (doseq [[index id] (map-indexed vector ids)
                     channel (range 2)]
               (let [length (* (inc index) 512)

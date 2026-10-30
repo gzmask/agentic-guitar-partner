@@ -446,6 +446,31 @@ Important boundaries:
 - FX100 software monitoring uses 0.30 gain. The normalized loop bus uses 0.65,
   making recorded playback dominant over the software live path while keeping a
   coherent full-scale monitor-plus-loop mix below the final ±0.98 limiter.
+- Quiet clips receive fixed **playback-only** stereo makeup gain: target peak
+  0.5 before the 0.65 loop bus, maximum 16× (~24 dB), no boost for stereo RMS
+  below -50 dBFS or clips already at/above the target peak. A native host-thread
+  scan measures only the acknowledged retained offset/length (not the later stop
+  gesture). It never changes PCM tables, WAV files, monitoring, prompts, or the
+  detector, and does not recover lost signal-to-noise ratio.
+- The engine measures loaded clips before starting the worker and new clips
+  while processing their native finalization acknowledgement, then caches gain
+  until invalidation/replacement. No bulk scan occurs on a timed playback
+  request or consumes its scheduling lead. Gain travels in the existing
+  sequenced playback operation; Csound applies it with the original ramps and
+  shared mix normalization. No per-block host DSP or new service exists. Loaded
+  WAVs are measured again without a metadata migration.
+  Raw native fixtures can explicitly retain unity; application playback uses
+  the measured value. Native gain bounds and buffer-range checks fail closed.
+- Regression checks cover the bounded boost, every original recorded stereo
+  sample, identical L/R gain, music/noise-floor/full-scale cases, excluding loud
+  command audio beyond the retained boundary, cache invalidation/loaded clips,
+  and six coherent boosted layers plus monitoring. The user's two saved FX100
+  clips have source peaks near -28/-27 dBFS and RMS near -41/-43 dBFS; the former
+  bus attenuation alone made them especially quiet. An offline loaded-session
+  render through the actual host mailbox raised them by 22.411/21.311 dB, both
+  reaching -9.762 dBFS output peak without limiting; SHA-256 hashes of both source
+  WAVs stayed identical. Higher playback still needs a low-volume hardware
+  listening pass; offline amplitude tests are not that pass.
 
 ### Audio format and capacity
 
