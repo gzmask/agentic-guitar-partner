@@ -134,11 +134,14 @@ so trimming cannot destroy synchronization.
 ### Persistent sessions
 
 `--live` stores sessions under `sessions/` at the repository root (git-ignored).
-Set `AUDIO_LOOPER_SESSIONS_DIR` to use another location. Offline preview/checks
-never create production sessions or open audio devices.
+Set `AUDIO_LOOPER_SESSIONS_DIR` to use another location. New folder names use
+readable **machine-local time**, for example `2026-10-30_09-14-23-<uuid>`; `TZ`
+can explicitly override the timezone. The UUID prevents same-second/DST
+collisions. Existing Unix-timestamp-named sessions still load without renaming.
+Offline preview/checks never create production sessions or open audio devices.
 
 ```text
-sessions/<timestamp>-<uuid>/
+sessions/YYYY-MM-DD_HH-mm-ss-<uuid>/
 ├── session.edn                 # schema version, ID, timestamps, profile, master, tracks
 ├── track-1-<uuid>.wav           # finalized stereo PCM; other occupied slots follow
 └── .lock                       # OS lock, automatically released on process exit
@@ -226,8 +229,9 @@ sequenced native transport, every recorded stereo PCM sample, arbitrary sample
 boundaries, silence trim, six-slot mixing, capacity handling, prompt playback,
 session save/reload (every retained stereo sample), atomic failure recovery,
 invalid-file/lock rejection, the native `pitchamdf` lifecycle, and the native scrape recognizer against six
-synthetic profile fixtures plus negative tone/noise fixtures. It opens no audio
-device.
+synthetic profile fixtures plus negative tone/noise, short-attack and interrupted-burst
+fixtures. It also checks quiet-only rearming, local-time names and legacy session
+compatibility. It opens no audio device.
 
 Static development checks:
 

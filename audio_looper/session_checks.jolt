@@ -6,7 +6,8 @@
             [audio-looper.sessions :as sessions]
             [audio-looper.voice :as voice]
             [audio-looper.wav :as wav]
-            [clojure.java.io :as io]))
+            [clojure.java.io :as io]
+            [clojure.string :as str]))
 
 
 (defn- verify!
@@ -46,6 +47,32 @@
                           :start-sample origin :length-samples length-samples
                           :record-cycles (when (:master state)
                                            (quot length-samples (get-in state [:master :length-samples])))})))))
+
+
+(defn- check-session-names!
+  [owner root]
+  (let [store (sessions/create! root control/default-profile)]
+    (try
+      (let [{:keys [metadata directory]} @store
+            id (:id metadata)
+            local-time (str/trim (:out (voice/run-child!
+                                         owner 2000 ["/bin/date" "-r" (str (quot (:created-at metadata) 1000))
+                                                     "+%Y-%m-%d_%H-%M-%S"])))]
+        (verify! "new session names use a readable local timestamp and UUID"
+                 (and (re-matches #"[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}-[a-f0-9-]{36}" id)
+                      (str/starts-with? id (str local-time "-"))
+                      (= id (.getName (io/file directory)))))
+        (let [legacy-id (str (:created-at metadata) "-" (java.util.UUID/randomUUID))
+              legacy-directory (io/file root legacy-id)]
+          (verify! "legacy fixture directory is created" (.mkdir legacy-directory))
+          (spit (io/file legacy-directory "session.edn") (pr-str (assoc metadata :id legacy-id)))
+          (let [loaded (sessions/open! (.getPath legacy-directory))]
+            (try
+              (verify! "Unix-timestamp-named sessions remain loadable"
+                       (= legacy-id (get-in @loaded [:metadata :id])))
+              (finally (sessions/close! loaded))))))
+      (finally (sessions/close! store))))
+  (println "PASS local-time session directory names and legacy timestamp compatibility"))
 
 
 (defn- round-trip!
@@ -266,6 +293,7 @@
   (let [owner (voice/prepare! #{} nil)
         root (.getPath (io/file (:directory @owner) "sessions"))]
     (try
+      (check-session-names! owner root)
       (round-trip! owner root)
       (check-performing-export! owner root)
       (check-trim! owner root)

@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "A lock-free error latch is required");
@@ -185,6 +186,17 @@ int looperSaveTrack(void *context, int slot, const char *path, int offset, int f
     if (sf_close(file) != 0) result = 5;
     if (result != 0) unlink(path);
     return result;
+}
+
+/* Use libc's actual machine-local timezone (or explicit TZ override), not the
+ * hosted runtime's UTC fallback. Caller owns the buffer; no shared tm/string. */
+int looperFormatLocalTime(long seconds, char *buffer, int bytes) {
+    if (seconds < 0 || buffer == NULL || bytes < 20) return 1;
+    time_t instant = (time_t)seconds;
+    struct tm local;
+    tzset();
+    if (localtime_r(&instant, &local) == NULL) return 2;
+    return strftime(buffer, (size_t)bytes, "%Y-%m-%d_%H-%M-%S", &local) == 0 ? 3 : 0;
 }
 
 /* A process-scoped advisory lock is automatically released on signals/crashes.

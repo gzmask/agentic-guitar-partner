@@ -7,13 +7,17 @@ This document is the design and verification record for the looper POC.
 ### Persistent sessions
 
 `audio_looper/sessions.jolt` owns version-1 EDN manifests under the git-ignored
-`sessions/<timestamp>-<uuid>/` root, configurable with
+`sessions/YYYY-MM-DD_HH-mm-ss-<uuid>/` root, configurable with
 `AUDIO_LOOPER_SESSIONS_DIR`. Startup in `--live` offers new/load before device
 selection. Loading retains the command profile, master period and occupied slot
 identities/lengths. All tracks are stopped, parser/effect/transport IDs are fresh,
 and the master origin is rebased to zero. Current devices are always selected
 again; a saved profile skips live note recapture, not headphone/device safety.
-Preview remains read-only and never creates session folders.
+Preview remains read-only and never creates session folders. New IDs use libc's
+machine-local timezone (or an explicit `TZ` override), avoiding the hosted
+runtime's UTC fallback. UUIDs disambiguate same-second and DST collisions;
+version-1 Unix-timestamp IDs remain accepted for legacy sessions. Metadata
+creation/update epochs remain numeric for sorting.
 
 After an accepted reducer finalization acknowledgement, and before dispatching
 subsequent effects, the host bulk-exports only the finalized immutable PCM range
@@ -44,7 +48,8 @@ performance thread starts; only then is restored application state displayed.
 sparse slot IDs, stereo sample-for-sample save/load, trimmed-master offset
 round-trips, loaded playback, retained master after original-slot erase, stopped
 restore state, concurrent-open rejection, corrupt/missing/non-finite WAVs,
-invalid/untrusted EDN, failed-load cleanup and injected atomic-manifest failure.
+invalid/untrusted EDN, failed-load cleanup, local-time/legacy directory names
+and injected atomic-manifest failure.
 The runtime checks cover accepted/unmatched/duplicate acknowledgements and disk
 failure propagation. PTY checks cover new/load cancellation, EOF, SIGINT/SIGTERM,
 terminal/cursor restoration and lock release after signals without opening audio.

@@ -99,6 +99,7 @@
          :load-track (ffi/foreign-fn "looperLoadTrack" [:pointer :int :pointer :int] :int :blocking)
          :save-track (ffi/foreign-fn "looperSaveTrack"
                                     [:pointer :int :pointer :int :int] :int :blocking)
+         :format-local-time (ffi/foreign-fn "looperFormatLocalTime" [:long :pointer :int] :int)
          :session-lock (ffi/foreign-fn "looperSessionLock" [:pointer] :int :blocking)
          :session-unlock (ffi/foreign-fn "looperSessionUnlock" [:int] :void)
          :commit-file (ffi/foreign-fn "looperCommitFile" [:pointer :pointer :pointer] :int :blocking)
@@ -365,6 +366,18 @@
           (when-not (zero? code)
             (fail! :persistence "Cannot save stereo PCM track." {:file path :code code}))))))
   nil)
+
+
+(defn local-timestamp
+  "Filesystem-safe local wall-clock name, honoring the OS timezone or TZ."
+  [milliseconds]
+  (when-not (and (integer? milliseconds) (<= 0 milliseconds 253402300799999))
+    (fail! :persistence "Invalid session creation time." {}))
+  (with-open [arena (ffi/confined-arena)]
+    (let [buffer (ffi/alloc arena 32)
+          code ((:format-local-time @api) (quot milliseconds 1000) buffer 32)]
+      (when-not (zero? code) (fail! :persistence "Cannot format the local session time." {:code code}))
+      (ffi/ptr->string buffer))))
 
 
 (defn lock-session!
