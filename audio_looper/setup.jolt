@@ -106,16 +106,17 @@
       (if-let [index (when (re-matches #"[0-9]+" text) (parse-long text))]
         (if (<= 1 index (count (get-in state [:inventory :inputs])))
           (let [input (nth (get-in state [:inventory :inputs]) (dec index))
-                line? (str/includes? (str/lower-case (:name input)) "fx100")]
+                line? (str/includes? (str/lower-case (:name input)) "fx100")
+                saved-profile (:saved-profile state)]
             (assoc state :input input :monitor? line? :headphones? false :headphones-required? (not line?)
-                   :profile nil
-                   :stage (if line? :profile :headphones) :message nil))
+                   :profile saved-profile
+                   :stage (if line? (if saved-profile :ready :profile) :headphones) :message nil))
           (assoc state :message "Select a device from the current list."))
         (assoc state :message "Enter the input's list number, or q."))
       (and (= :line type) (= :headphones stage))
       (if (= "y" (str/lower-case text))
-        (assoc state :headphones? true :monitor? false :profile nil
-               :stage :profile :message nil)
+        (assoc state :headphones? true :monitor? false :profile (:saved-profile state)
+               :stage (if (:saved-profile state) :ready :profile) :message nil)
         (assoc state :message "Headphones are required; type y to confirm or q to quit."))
       (and (= :line type) (= :profile stage))
       (case text

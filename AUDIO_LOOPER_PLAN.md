@@ -4,14 +4,60 @@
 
 This document is the design and verification record for the looper POC.
 
+### Persistent sessions
+
+`audio_looper/sessions.jolt` owns version-1 EDN manifests under the git-ignored
+`sessions/<timestamp>-<uuid>/` root, configurable with
+`AUDIO_LOOPER_SESSIONS_DIR`. Startup in `--live` offers new/load before device
+selection. Loading retains the command profile, master period and occupied slot
+identities/lengths. All tracks are stopped, parser/effect/transport IDs are fresh,
+and the master origin is rebased to zero. Current devices are always selected
+again; a saved profile skips live note recapture, not headphone/device safety.
+Preview remains read-only and never creates session folders.
+
+After an accepted reducer finalization acknowledgement, and before dispatching
+subsequent effects, the host bulk-exports only the finalized immutable PCM range
+(including any native trim offset) to a unique stereo float64 WAV at 44.1 kHz.
+Native file copying uses bounded chunks in `diagnostics.c` on the calling host
+thread, not the audio worker. Clip-length channels publish before finalization
+events so an acknowledged export cannot race stale length metadata. Csound's
+fixed table addresses are bound before performance and never exposed to Jolt.
+No table can be rewritten until export
+returns. The real-time worker keeps mixing; slow storage may delay host command
+handling, and existing bounded transport still fails closed on overflow.
+
+WAV close/sync and same-directory atomic rename precede manifest sync/rename.
+The manifest alone publishes durable track membership. Erase updates it only
+after native ack, then removes obsolete PCM. A write failure is a nonzero session
+failure; old committed data remains loadable (an interrupted commit may leave an
+unreferenced new WAV/temp file). Incomplete/cancelled recordings are deliberately
+not persisted. No shutdown-time attempt is made to salvage active PCM.
+
+A process-owned advisory OS lock prevents concurrent writers and is released by
+normal cleanup or process death. Metadata is bounded to 64 KiB, schema/profile/
+slot/cycle identities are validated, filenames cannot escape the session, and
+symlinked session files are rejected. Missing, truncated, wrong-format/dimension,
+or non-finite audio refuses reload. Native bulk preload completes before the
+performance thread starts; only then is restored application state displayed.
+
+`--check-sessions` and the complete offline suite exercise new/empty sessions,
+sparse slot IDs, stereo sample-for-sample save/load, trimmed-master offset
+round-trips, loaded playback, retained master after original-slot erase, stopped
+restore state, concurrent-open rejection, corrupt/missing/non-finite WAVs,
+invalid/untrusted EDN, failed-load cleanup and injected atomic-manifest failure.
+The runtime checks cover accepted/unmatched/duplicate acknowledgements and disk
+failure propagation. PTY checks cover new/load cancellation, EOF, SIGINT/SIGTERM,
+terminal/cursor restoration and lock release after signals without opening audio.
+
 ### Experimental global low-E scrape stop
 
 The Csound detector in `audio_looper/scrape.jolt` compares 24 normalized
-900–5500 Hz stereo-power bands against a fingerprint derived from one low-E
-scrape on the user's FX100. No captured PCM is stored in the repository. It
-uses a 2048-sample Hann window, 441-sample hop, an approximately 0.8-second
-noise calibration, a 0.90 match threshold, a 12 dB signal-to-noise gate,
-spectral-shape guards and 12 matching frames with bounded gaps. A detection
+900–5500 Hz stereo-power bands against an aggregate fingerprint derived from six
+low-E scrapes with varied speed, force, and contact position on the user's
+FX100/pickup/preset chain. No captured PCM is stored in the repository. It uses
+a 2048-sample Hann window, 441-sample hop, an approximately 0.8-second noise
+calibration, a 0.90 match threshold, a 10 dB signal-to-noise gate,
+spectral-shape guards and 8 matching frames with bounded gaps. A detection
 emits the estimated first matching window onset through the existing sequenced
 event ring, with a native recorder ID when one is active. In recording state,
 the gesture cancels an arm or requests finalization without wake. After wake it
@@ -24,24 +70,28 @@ First/master recordings use that onset (then the existing outer-silence trim).
 Later recordings stop at the last completed master boundary before the onset;
 if no complete cycle exists, recording continues. FFT windowing means onset is
 an estimate and may precede physical string contact. Failed detections remain in
-the recording, and false detections can stop it early. This single-example
-fingerprint is experimental and not validated across guitars, tones, levels,
-normal playing or hardware. `[d]` exposes match, level, and noise. No new service, audio process, per-block
-host DSP, or live input was added by this change.
+the recording, and false detections can stop it early. This six-example
+fingerprint covers the recorded variations but remains experimental and is not
+validated across guitars, tones, levels, normal playing, or hardware. `[d]`
+exposes match, level, and noise. No new service, audio process, per-block host
+DSP, or live input was added by this change.
 
-Offline verification includes a generated 24-band synthetic positive fixture,
-inverted stereo channels, a pitched negative, ring/correlation and pending-ack
-checks, queued-playback cancellation/race handling, and PCM preservation. Separately, the real FX100 recording used to design
-it was evaluated offline from `/tmp`; it is neither a committed fixture nor a
-substitute for testing false positives and generalization. **The production
-Csound integration has not yet been validated with live hardware.**
+Offline verification includes six generated positive fixtures based on the
+measured profiles, inverted stereo channels, a pitched negative, broadband
+noise, ring/correlation and pending-ack checks, queued-playback
+cancellation/race handling, and PCM preservation. Separately, the six real
+FX100 scrapes used to tune it were evaluated offline from `/tmp`; they are
+neither committed fixtures nor a substitute for testing false positives and
+generalization. **The updated production Csound integration has not yet been
+revalidated in the live looper after this six-scrape calibration.**
 
 The compact command grammar is wake → slot → wait for default recording,
 wake → slot → 2 for playback, wake → slot → 3 for erase, wake → slot → scrape
 to stop playback, and wake → scrape to exit. The selector is a shared prefix:
-empty slots begin recording setup only after a two-second action window plus
-350 ms recognition grace. With a master, setup selects 1–6 full cycles; without a
-master it arms a free-length recording. Existing clips are never overwritten. Scrape commands are accepted while
+empty slots arm recording after a two-second action window plus 350 ms recognition
+grace. Both master and non-master recordings then continue until a low-E scrape;
+non-master length is the number of complete master cycles before that scrape.
+Existing clips are never overwritten. Scrape commands are accepted while
 the relevant voice prompt is playing; note actions still wait for prompt guards.
 Playback cancellation uses a correlated native operation; if the start raced it,
 the host queues a boundary stop instead of claiming an immediate stop. Earlier
@@ -60,14 +110,16 @@ jolt guitar-audio-looper.jolt --devices       # current CoreAudio metadata only
 jolt guitar-audio-looper.jolt --check-control # pure control checks
 jolt guitar-audio-looper.jolt --check-ui      # pure setup/renderer checks
 jolt guitar-audio-looper.jolt --check-runtime # reducer/effect adapter checks
+jolt guitar-audio-looper.jolt --check-sessions # temporary PCM save/load and failure checks
 jolt guitar-audio-looper.jolt --check-engine  # production DSP/PCM/TTS checks
 jolt guitar-audio-looper.jolt --check         # complete offline suite
-jolt guitar-audio-looper.jolt --live          # live mode; input selection starts audio
+jolt guitar-audio-looper.jolt --live          # choose new/load session, then current audio input
 ```
 
 Sources: `audio_looper/csound.jolt` and
 `audio_looper/diagnostics.c` own native integration. In that same directory,
 `control.jolt` and `notes.jolt` own pure policy/reference behavior;
+`sessions.jolt` owns durable manifests and acknowledged track checkpoints;
 `dsp.jolt` and `engine.jolt` own the production Csound document and bounded
 transport; `runtime.jolt` owns reducer/effect dispatch; `voice.jolt` owns finite
 temporary prompt assets; `setup.jolt`, `dashboard.jolt`, and `terminal.jolt`
@@ -85,9 +137,10 @@ events, prompt playback/cancellation, and the actual `pitchamdf` lifecycle again
 the pure reference. Every recorded stereo sample is compared with its source.
 
 Only `--live` can open devices. It requires a foreground TTY and fresh UID-based
-device resolution. Input selection is the sole mandatory keyboard setup; a
-post-input profile choice defaults to C major on Enter and offers custom scale/wake
-or C-major custom-wake capture in explicit `--live` mode. In live mode, C/D/E in
+device resolution. Session new/load and current input selection use the keyboard.
+For new sessions, a post-input profile choice defaults to C major on Enter and
+offers custom scale/wake or C-major custom-wake capture in explicit `--live` mode.
+Loaded sessions retain their saved profile. In live mode, C/D/E in
 the default scale also select menu options 1/2/3 after release and one second of
 silence. A warning is printed, but explicit `--live` replaces the former typed
 `LIVE` confirmation.
@@ -657,8 +710,8 @@ clip first. The initial implementation has no overdub behavior.
 Multiple slots may play concurrently. Only one slot may be armed or recording.
 While any slot is recording, the guitar command channel accepts only:
 
-- record stop for that active slot;
-- the direct degree-7 exit path.
+- a low-E scrape to stop that active recording;
+- wake followed by a low-E scrape to exit.
 
 Other loop commands are rejected. This prevents wake and command notes intended
 for one slot from being recorded into another slot's PCM waveform.
@@ -667,31 +720,29 @@ for one slot from being recorded into another slot's PCM waveform.
 
 ### Record start
 
-1. Recognize and validate the complete command. For a non-master clip, ask for
-   a length of 1–6 master cycles before arming; choices that exceed the 120-second
-   slot capacity are disabled.
-2. Announce that recording is armed (and repeat the selected cycle count for a
-   non-master clip).
+1. Recognize and validate the complete command. Both master and non-master clips
+   arm immediately; there is no up-front cycle-count question.
+2. Announce that recording is armed.
 3. Wait for the voice prompt and guard interval to finish, and require confirmed
    silence after the command. A held final command note cannot start the recorder;
    cancel an unscheduled arm after four seconds waiting for release.
 4. Start at the selected synchronization boundary, planned from the current
    audio clock (not a past prompt/guard timestamp after a delayed poll).
 5. Emit a short non-pitched cue and announce/display `RECORDING`. A non-master
-   take auto-finalizes at its selected full-cycle boundary; degree-2 stop remains
-   an early stop and keeps only completed cycles.
+   take continues until a low-E scrape; that scrape retains only complete master
+   cycles.
 
 No startup command or voice prompt may enter the recorded buffer.
 
 ### Record stop
 
-The engine cannot wait until the full stop command is recognized because the
-wake phrase and command notes would already have been recorded.
+The engine cannot wait until the full scrape is recognized because its trailing
+audio would already have been recorded.
 
-1. Keep recording while the command is being recognized.
-2. Retain the sample-aligned onset of the wake phrase's first note.
-3. After a valid `record stop`, choose the final audio boundary at or before that
-   onset according to the synchronization policy.
+1. Keep recording while the scrape is being recognized.
+2. Retain the sample-aligned estimated onset of the scrape.
+3. After a valid scrape, choose the final audio boundary at or before that onset
+   according to the synchronization policy.
 4. Discard all PCM samples after that boundary.
 5. For the first/master clip, scan bounded 10 ms stereo-RMS summaries and remove
    outer silence below -50 dBFS, retaining 20 ms preroll and 50 ms release tail.
@@ -701,9 +752,9 @@ wake phrase and command notes would already have been recorded.
 6. Apply the boundary crossfade.
 7. Mark the clip ready and announce completion.
 
-An invalid or timed-out command does not stop recording. Because commands other
-than record stop are rejected during recording, the first implementation does
-not attempt arbitrary middle-of-clip command removal.
+An unrecognized scrape does not stop recording. Because note commands other
+than wake followed by scrape for exit are rejected during recording, the
+implementation does not attempt arbitrary middle-of-clip command removal.
 
 ## Synchronization policy
 
@@ -711,14 +762,12 @@ The hardened default is a shared cycle:
 
 - The first successfully finalized clip establishes the master cycle length.
 - If no master exists, the first recording starts after its prompt/guard cue and
-  ends at the stop wake's onset-derived sample boundary.
-- Later recordings start on the next master-cycle boundary after the player
-  selects 1–6 cycles. The host passes that exact sample count to Csound; Csound
-  freezes PCM at the requested boundary and emits a correlated limit event for
-  host finalization.
-- A non-master take automatically ends after its selected number of complete
-  cycles. A manual degree-2 early stop still uses the latest completed
-  master-cycle boundary at or before the stop wake onset.
+  ends at the stop scrape's onset-derived sample boundary.
+- Later recordings start on the next master-cycle boundary and remain open until
+  a low-E scrape.
+- The scrape chooses the latest completed master-cycle boundary at or before its
+  estimated onset. If no complete cycle exists yet, recording continues. The
+  120-second capacity limit similarly retains the largest complete-cycle prefix.
 - Playback start and stop are queued to the next master-cycle boundary.
 - The terminal and voice distinguish `queued` from actual `started/stopped`.
 
@@ -1014,8 +1063,8 @@ Using generated temporary audio buffers:
 - Record-stop trimming uses wake onset/sample time, not confirmation time.
 - First/master recording outer silence is trimmed from bounded RMS summaries,
   with documented preroll/tail; synchronized later clips preserve cycle phase.
-- Non-master recording length selection is bounded by capacity and automatically
-  finalizes at exactly the selected number of master cycles.
+- Non-master recording starts on a shared boundary and a low-E scrape determines
+  its final number of complete master cycles; no cycle count is requested first.
 - Buffer bounds hold at zero, normal, and maximum durations.
 - Boundary crossfades avoid discontinuities.
 - Six concurrent players mix without clipping under the defined gain policy.

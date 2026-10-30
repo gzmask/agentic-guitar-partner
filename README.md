@@ -14,12 +14,13 @@ The entry point is [`guitar-audio-looper.jolt`](guitar-audio-looper.jolt).
 It provides:
 
 - six equivalent stereo PCM loop slots;
+- persistent session folders with lossless stereo WAV tracks and versioned metadata;
 - one active recorder, no overdub;
 - octave-independent guitar commands based on C-major scale degrees;
 - sample-accurate recording and playback boundaries;
 - context-sensitive low-E string scrape to stop recording or playback, or exit;
 - outer-silence trimming for the first/master loop;
-- synchronized later loops with a selectable 1–6 master-cycle length and automatic finalization;
+- synchronized later loops whose completed master-cycle count is set by the stop scrape;
 - queued cycle-boundary playback;
 - spoken prompts mixed by Csound, not played directly by `say`;
 - a fixed ANSI dashboard and a line-oriented `--no-tui` mode;
@@ -33,6 +34,9 @@ Run commands from the repository root:
 # Complete offline suite; does not open an audio device
 jolt guitar-audio-looper.jolt --check
 
+# Persistence-only offline checks; temporary files, no audio device
+jolt guitar-audio-looper.jolt --check-sessions
+
 # Inspect current CoreAudio metadata; does not open a stream
 jolt guitar-audio-looper.jolt --devices
 
@@ -44,9 +48,11 @@ jolt guitar-audio-looper.jolt --live
 ```
 
 `--live` is the only mode that opens audio devices. It requires a foreground
-terminal. Select the input with the keyboard, then choose a control profile:
-press Enter/1 for C major with the default wake, 2 to capture a custom scale and
-wake, or 3 to keep C major and capture a custom wake. In `--live`, play C/D/E
+terminal. First choose **New session** (Enter/`n`) or **Load previous session**
+(`l`, then its list number). Select the current input with the keyboard. A loaded
+session restores its saved control profile; a new session offers Enter/1 for
+C major with the default wake, 2 to capture a custom scale and wake, or 3 to keep
+C major and capture a custom wake. In `--live`, play C/D/E
 from the default scale to select options 1/2/3; release the note and wait for
 silence. Keyboard selection remains available. Setup capture opens the selected
 input with monitoring off. The finite speech cache is generated before any audio
@@ -70,7 +76,7 @@ The low-E scrape is the context-sensitive stop/exit gesture:
 
 | Guitar sequence | Action |
 | --- | --- |
-| Wake → degree 1–6 (C–A), then wait | Select an empty slot and begin recording setup |
+| Wake → degree 1–6 (C–A), then wait | Select an empty slot and arm recording |
 | While recording → scrape low E | Stop recording directly |
 | Wake → slot → degree 2 (D) | Start that slot's playback |
 | Wake → slot → scrape low E | Stop that slot's playback, or cancel its queued start |
@@ -79,19 +85,20 @@ The low-E scrape is the context-sensitive stop/exit gesture:
 
 `Wake → slot` is a prefix of the playback and erase commands, so after the slot
 selection prompt there is a two-second action window plus 350 ms recognition
-grace. If no action arrives, an **empty, idle** slot begins recording setup; a
-slot with an existing clip never auto-records or overwrites it. Degree 1 after
-slot selection can also explicitly begin recording setup. Wait for the recording-armed prompt
+grace. If no action arrives, an **empty, idle** slot arms recording; a slot with
+an existing clip never auto-records or overwrites it. Degree 1 after slot
+selection can also explicitly arm recording. Wait for the recording-armed prompt
 and start cue before playing the take. Notes played during spoken prompts and
 their guards are ignored; wait for the prompts before selecting a note.
 Contextual scrapes are accepted during those prompts. A scrape also cancels an
 armed recording.
 
-The experimental scrape recognizer uses a fixed spectral fingerprint from one
-FX100/pickup/preset sample, not a general classifier or pitch recognition. It
-calibrates input noise over the first ~0.8 seconds; different guitars, effects,
-levels, or normal playing can cause missed or false triggers. `[d]` displays its
-current match and noise level.
+The experimental scrape recognizer uses an aggregated spectral fingerprint from
+six low-E scrapes with varied speed, force, and contact position through the
+same FX100/pickup/preset chain. It is not a general classifier or pitch
+recognizer. It calibrates input noise over the first ~0.8 seconds; different
+guitars, effects, levels, or normal playing can still cause missed or false
+triggers. `[d]` displays its current match and noise level.
 
 On a recognized scrape, finalization uses its estimated onset, not the later
 recognition time. The onset is an analysis-window estimate, not a guarantee of
@@ -100,12 +107,12 @@ clips the stop is rounded back to the most recent completed master cycle; if no
 cycle is complete, recording continues. Verify results before relying on this
 experimental control.
 
-For the first/master clip, record freely and stop with a scrape. Once a master
-exists, recording setup asks for the later clip's length: play scale degree 1–6
-(C, D, E, F, G, A in any octave) to record that many full master cycles, or
-scrape to cancel. The recorder starts on the next shared boundary and
-finalizes automatically at the selected boundary. A scrape stops it early,
-keeping only completed master cycles. Choices exceeding 120 seconds are disabled.
+For the first/master clip, record freely and stop with a scrape. Later clips arm
+without asking for a cycle count, start on the next shared master boundary, and
+continue until another low-E scrape. That scrape determines the length by keeping
+all complete master cycles before its estimated onset. If it arrives before one
+complete cycle, recording continues. At the 120-second capacity limit, the
+looper keeps the largest complete-cycle prefix that fits.
 
 Erase is a direct command and is published only after the native engine
 acknowledges it. Playback stop occurs at the next master boundary; cancelling a
@@ -118,6 +125,39 @@ The first finalized clip establishes the master cycle. Its leading/trailing
 silence is trimmed from bounded 10 ms stereo-RMS summaries at -50 dBFS, retaining
 20 ms preroll and 50 ms release tail. Later clips preserve complete master cycles
 so trimming cannot destroy synchronization.
+
+### Persistent sessions
+
+`--live` stores sessions under `sessions/` at the repository root (git-ignored).
+Set `AUDIO_LOOPER_SESSIONS_DIR` to use another location. Offline preview/checks
+never create production sessions or open audio devices.
+
+```text
+sessions/<timestamp>-<uuid>/
+├── session.edn                 # schema version, ID, timestamps, profile, master, tracks
+├── track-1-<uuid>.wav           # finalized stereo PCM; other occupied slots follow
+└── .lock                       # OS lock, automatically released on process exit
+```
+
+Each accepted native finalization saves the retained PCM as a 44.1 kHz stereo
+**float64 WAV**, preserving the engine's samples without resynthesis or gain
+changes. The manifest records each occupied slot and its exact frame count;
+cycle counts follow from the master length. Erasing a track commits the new
+manifest before removing its old WAV. In-progress/cancelled recordings are not
+saved. Quit/Ctrl+C keeps previously committed clips, not an unfinished take.
+
+Loading restores occupied slots, the master period and the custom scale/wake.
+All tracks start **stopped**, with no queued operations; the master sample-clock
+origin is reset to zero. Input/output devices are selected afresh, never opened
+using stale saved `adcN`/`dacN` identifiers. Recording continues in the same folder.
+
+WAV files are committed before the manifest, using same-directory atomic renames
+and file/directory sync. A write error stops the session with a nonzero exit
+rather than reporting a successful save. A crash can leave an unreferenced file,
+which loading ignores. Missing/corrupt/non-finite WAVs, invalid metadata and
+concurrent writers are rejected; do not edit files while a session is open.
+Storage runs on the host thread, never the real-time audio thread. Sessions are
+not automatically backed up or pruned.
 
 ### Audio safety
 
@@ -179,8 +219,10 @@ jolt guitar-audio-looper.jolt --check
 It covers pure command policy, setup/dashboard behavior, runtime effect dispatch,
 sequenced native transport, every recorded stereo PCM sample, arbitrary sample
 boundaries, silence trim, six-slot mixing, capacity handling, prompt playback,
-the native `pitchamdf` lifecycle, and the native scrape recognizer on a synthetic
-fixture and negative tone. It opens no audio device.
+session save/reload (every retained stereo sample), atomic failure recovery,
+invalid-file/lock rejection, the native `pitchamdf` lifecycle, and the native scrape recognizer against six
+synthetic profile fixtures plus negative tone/noise fixtures. It opens no audio
+device.
 
 Static development checks:
 

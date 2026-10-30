@@ -1,15 +1,18 @@
 (ns audio-looper.scrape
-  "Csound-only experimental scrape recognition. Profile is an averaged, normalized
-  spectral fingerprint of one FX100 low-E scrape; it contains no PCM samples.")
+  "Csound-only experimental scrape recognition. The profile is an aggregated,
+  normalized spectral fingerprint of six varied FX100 low-E scrapes; it contains
+  no PCM samples.")
 
 
 (def template
-  [0.140151050076 0.137967863701 0.117862488282 0.136047076818
-   0.107516372502 0.106331323817 0.134423458531 0.167237711325
-   0.425593433323 0.272539174026 0.258129721358 0.225944062038
-   0.088800810167 0.104731528709 0.065735454236 0.059473591421
-   0.100201335525 0.238333562622 0.584478836607 0.108162521805
-   0.101393530709 0.119401834433 0.116268919408 0.044750600994])
+  ;; Normalized mean of six low-E scrapes with varied speed, force and contact
+  ;; position, captured through the same FX100/pickup/preset chain.
+  [0.112743500303 0.121087651445 0.085181933136 0.084229325660
+   0.121964636807 0.186716522000 0.234081597938 0.271175604696
+   0.416010373511 0.283124493506 0.304914529312 0.115688671340
+   0.090915027988 0.126824726643 0.086602404609 0.081340056164
+   0.133546715828 0.277095797653 0.512499329000 0.087556949517
+   0.077252019491 0.068916579022 0.074811137324 0.030125743724])
 
 
 (def orchestra
@@ -99,7 +102,10 @@ instr 11
         kg = kg+1
       od
       kscore = kdot/max(sqrt(knorm), 0.00000000000000000001)
-      kgood = (kscore >= 0.90 && kdb >= max(-100,knoise+12) && kflat >= 0.02 && kentropy >= 0.48 && kweighted/max(ksum,0.00000000000000000001) >= 400 && khigh/max(ksum,0.00000000000000000001) >= 0.03 ? 1 : 0)
+      ; Six varied captures include a quieter, shorter scrape. Ten dB above the
+      ; calibrated floor plus eight matching 10 ms hops keeps that gesture while
+      ; still requiring the spectral-shape guards and a sustained match.
+      kgood = (kscore >= 0.90 && kdb >= max(-100,knoise+10) && kflat >= 0.02 && kentropy >= 0.48 && kweighted/max(ksum,0.00000000000000000001) >= 400 && khigh/max(ksum,0.00000000000000000001) >= 0.03 ? 1 : 0)
       chnset kscore, \"scrape/score\"
       chnset kdb, \"scrape/db\"
       chnset knoise, \"scrape/noise\"
@@ -130,7 +136,7 @@ instr 11
           kfirst = -1
           klast = -1
         endif
-        if khits >= 12 then
+        if khits >= 8 then
           if krecording == 1 then
             Emit 12, gkClock, gkRecId[gkRecSlot], gkRecSlot+1, kfirst, kscore, 0, 0, 0
           else

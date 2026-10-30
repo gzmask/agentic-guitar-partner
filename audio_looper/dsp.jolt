@@ -33,8 +33,7 @@ gkRecSlot init -1
 gkRec[] init 6
 gkStart[] init 6
 gkRecId[] init 6
-gkRecTarget[] init 6
-gkLength[] init 6
+gkLength[] fillarray __LENGTHS__
 gkOffset[] init 6
 gkPlay[] init 6
 gkPlayStart[] init 6
@@ -102,8 +101,7 @@ instr 2
     elseif kop != int(kop) || kop < 1 || kop > 10 || kid < 1 || kid != int(kid) || krawslot != kslot then
       gkFatal = 2
     elseif kop == 1 then
-      if gkRecSlot >= 0 || gkLength[kslot] > 0 || gkPlay[kslot] != 0 ||
-         klen < 0 || klen > __CAP__ || klen != int(klen) then
+      if gkRecSlot >= 0 || gkLength[kslot] > 0 || gkPlay[kslot] != 0 || klen != 0 then
         gkFatal = 3
       elseif kat < gkClock || kat != int(kat) then
         gkFatal = 4
@@ -112,7 +110,6 @@ instr 2
         gkRec[kslot] = 1
         gkStart[kslot] = kat
         gkRecId[kslot] = kid
-        gkRecTarget[kslot] = klen
         gkOffset[kslot] = 0
       endif
     elseif kop == 2 then
@@ -151,7 +148,6 @@ instr 2
         gkRecSlot = -1
         gkOffset[kslot] = koffset
         gkLength[kslot] = kactual
-        gkRecTarget[kslot] = 0
         Emit 4, gkClock, kid, kslot+1, kactual, koffset, 0, 0, 0
       endif
     elseif kop == 3 then
@@ -162,7 +158,6 @@ instr 2
         gkRecSlot = -1
         gkLength[kslot] = 0
         gkOffset[kslot] = 0
-        gkRecTarget[kslot] = 0
         Emit 5, gkClock, kid, kslot+1, 0, 0, 0, 0, 0
       endif
     elseif kop == 4 || kop == 5 then
@@ -300,22 +295,17 @@ opcode Slot, aaa, aai
     if gkRec[islot] == 2 then
       kindex = kpos - gkStart[islot]
       if kindex >= 0 && kindex < __CAP__ then
-        if gkRecTarget[islot] > 0 && kindex >= gkRecTarget[islot] then
-          gkRec[islot] = 3
-          Emit 10, kpos, gkRecId[islot], islot+1, kindex, 0, 0, 0, 0
-        else
-          tablew kinL, kindex, itabL
-          tablew kinR, kindex, itabR
-          knewblock = floor(kindex/441)
-          if knewblock != kblock then
-            kblock = knewblock
-            ksum = 0
-            kcount = 0
-          endif
-          ksum = ksum + (kinL*kinL + kinR*kinR)*0.5
-          kcount = kcount + 1
-          tablew sqrt(ksum/kcount), kblock, 500+islot
+        tablew kinL, kindex, itabL
+        tablew kinR, kindex, itabR
+        knewblock = floor(kindex/441)
+        if knewblock != kblock then
+          kblock = knewblock
+          ksum = 0
+          kcount = 0
         endif
+        ksum = ksum + (kinL*kinL + kinR*kinR)*0.5
+        kcount = kcount + 1
+        tablew sqrt(ksum/kcount), kblock, 500+islot
       else
         gkRec[islot] = 3
         Emit 10, kpos, gkRecId[islot], islot+1, kindex, 0, 0, 0, 0
@@ -434,6 +424,14 @@ instr 30
 endin
 
 instr 90
+  ; Publish clip lengths BEFORE finalization events. A host that observes the
+  ; event can immediately validate/export its now-immutable PCM table range.
+  ki = 0
+  while ki < 6 do
+    Slen sprintfk \"slot/%d/length\", ki
+    chnset gkLength[ki], Slen
+    ki = ki + 1
+  od
   ; Events from local sample-rate UDOs are stably sorted within this block.
   ; This keeps delivery timestamps monotonic even with six simultaneous slots.
   kleft = gkQCount
@@ -467,16 +465,10 @@ instr 90
   gkQCount = 0
   ; Publish clock LAST. Host reads clock BEFORE e/write, then drains all
   ; included events before ticking its reducer. No torn clock/event snapshot.
-  gkClock = gkClock + ksmps
-  chnset gkClock, \"engine/clock\"
   chnset gkFatal, \"engine/fatal\"
   chnset gkPeak, \"engine/peak\"
-  ki = 0
-  while ki < 6 do
-    Slen sprintfk \"slot/%d/length\", ki
-    chnset gkLength[ki], Slen
-    ki = ki + 1
-  od
+  gkClock = gkClock + ksmps
+  chnset gkClock, \"engine/clock\"
 endin
 
 ; Offline checks can inject the SAME mailbox protocol before performance.
@@ -495,12 +487,15 @@ endin")
 
 (defn document
   [{:keys [input output input-device output-device input-channels capacity duration prompts operations
-           monitor? detect? gate trim-gate trace? live?]
+           monitor? detect? gate trim-gate trace? live? clips]
     :or {capacity 5292000 duration 600 input-channels 2 monitor? false detect? true
          gate -44 trim-gate -50}}]
   (when-not (and (integer? capacity) (<= 1 capacity 5292000) (<= 0.01 duration 600)
                 (<= -90 gate -6) (<= -90 trim-gate -6) (or input (and live? input-device output-device))
-                (or input (empty? operations)))
+                (or input (empty? operations))
+                (<= (count clips) 6) (= (count clips) (count (set (map :id clips))))
+                (every? #(and (integer? (:id %)) (<= 1 (:id %) 6)
+                              (integer? (:length-samples %)) (<= 1 (:length-samples %) capacity)) clips))
     (throw (ex-info "Invalid DSP configuration or live fixture injection." {})))
   (let [prompts (vec prompts)
         source (if input (str "gaInL, gaInR diskin2 " (quote-path input) ", 1, 0, 0")
@@ -531,6 +526,8 @@ endin")
                                         "chnset gkQ[kbest*9+" i "], S" i)) fields))
         body (reduce-kv str/replace orchestra
                         {"__CAP__" (str capacity) "__PROMPT_COUNT__" (str (count prompts))
+                         "__LENGTHS__" (str/join "," (let [lengths (into {} (map (juxt :id :length-samples) clips))]
+                                                      (map #(get lengths % 0) (range 1 7))))
                          "__TRIM_LEVEL__" (str (Math/pow 10.0 (/ trim-gate 20.0)))
                          "__SOURCE__" source "__DETECT__" (if detect? "1" "0") "__GATE__" (str gate)
                          "__MONITOR__" (if monitor? "1" "0") "__TRACE__" (or trace "") "__PUBLISH__" publish})]

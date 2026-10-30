@@ -12,6 +12,9 @@
       (when-let [created (:on-instance configuration)] (created instance))
       (native/compile! instance (dsp/document configuration))
       (native/prepare! instance)
+      (native/bind-track-tables! instance (:capacity configuration 5292000))
+      (doseq [{:keys [id file length-samples]} (:clips configuration)]
+        (native/load-track! instance id file length-samples))
       (doseq [{:keys [table file frames]} (:prompts configuration)]
         (let [wave (wav/read! file)]
           (when-not (and (= 1 (:channels wave)) (= 44100 (:rate wave)) (= frames (:frames wave)))

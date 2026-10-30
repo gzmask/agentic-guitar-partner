@@ -41,12 +41,9 @@
                 (:cycle slot))
         pending (:pending slot)]
     {:id (:id slot) :state label :length (:length-samples slot) :duration duration :cycle cycle
-     :cycles (:record-cycles slot) :target-length-samples (:target-length-samples slot)
-     :pending pending
+     :cycles (:record-cycles slot) :pending pending
      :text (str (:id slot) "  " (str/upper-case (name label))
                 (when (pos? duration) (str "  " (seconds duration)))
-                (when (pos? (or (:target-length-samples slot) 0))
-                  (str "  target=" (:record-cycles slot) "T"))
                 (when (and (= :ready (:clip-state slot)) (:record-cycles slot))
                   (str "  length=" (:record-cycles slot) "T"))
                 (when (= :playing play) (str "  cycle=" cycle))
@@ -73,14 +70,14 @@
         degrees (str/join "  " (map-indexed #(str (inc %1) "=" (note-name %2)) (:selectors configuration)))
         wake (str (str/join "-" (get-in configuration [:wake :degrees])) " ["
                   (str/join " " (map note-name (get-in configuration [:wake :midi]))) "]")]
-    {:preview? (:preview? context) :debug? (:debug? context)
+    {:preview? (:preview? context) :debug? (:debug? context) :session-id (:session-id context)
      :columns (max 20 (min 200 (or (:columns context) 100)))
      :rows (max 12 (min 80 (or (:rows context) 40)))
      :input (str (:name (:input context)) " [" (:id (:input context)) "]")
      :output (str (:name (:output context)) " [" (:id (:output context)) "]")
      :phase (str/upper-case (name phase))
      :voice (if voice (str (name (:state voice)) ": " (name (:prompt voice))) "idle")
-     :paused? (or voice (not (#{:dormant :wait-loop :wait-operation :wait-record-length} phase)))
+     :paused? (or voice (not (#{:dormant :wait-loop :wait-operation} phase)))
      :scale (or (:name configuration) "custom seven-degree scale") :degrees degrees :wake wake
      :timeout (when deadline (format "%.1fs" (/ (double (max 0 (- deadline (:sample state)))) 44100.0)))
      :slots (mapv #(slot-view state %) (:slots state))
@@ -101,8 +98,7 @@
                                        "Scrape low E to stop recording; wake then scrape exits."
                                        (str "Wake by degree in any octave: " wake))
                         :wait-loop "Scrape low E to exit, or select a looper."
-                        :wait-operation "Scrape stops playback; empty slot begins recording setup after the action window."
-                        :wait-record-length "Choose 1–6 master cycles, or scrape to cancel."
+                        :wait-operation "Scrape stops playback; empty slot begins recording after the action window."
                         :arm-release "Release the command note to begin recording; scrape to cancel."
                         :await-engine "Waiting for engine acknowledgement."
                         "Notes paused during prompt/guard; contextual scrape remains available.")
@@ -131,7 +127,8 @@
 
 (defn render
   [snapshot]
-  (let [headers [(str "GUITAR AUDIO LOOPER" (when (:preview? snapshot) " - OFFLINE PREVIEW (NO AUDIO)"))
+  (let [headers [(str "GUITAR AUDIO LOOPER" (when (:preview? snapshot) " - OFFLINE PREVIEW (NO AUDIO)")
+                      (when (:session-id snapshot) (str " | " (:session-id snapshot))))
                  (str "Input: " (:input snapshot)) (str "Output: " (:output snapshot))
                  (str "Control: " (:phase snapshot) "  Voice: " (:voice snapshot)
                       (when (:paused? snapshot) " [NOTES PAUSED]"))]
@@ -170,8 +167,8 @@
 
 (defn- line-key
   [snapshot]
-  (cond-> (select-keys snapshot [:input :output :phase :voice :scale :degrees :wake :options :debug?])
-    true (assoc :slots (mapv #(select-keys % [:id :state :length :cycles :target-length-samples :pending])
+  (cond-> (select-keys snapshot [:session-id :input :output :phase :voice :scale :degrees :wake :options :debug?])
+    true (assoc :slots (mapv #(select-keys % [:id :state :length :cycles :pending])
                              (:slots snapshot)))
     (:debug? snapshot) (assoc :pitch (:pitch snapshot) :gate (:gate snapshot) :scrape (:scrape snapshot)
                               :event (:event snapshot) :events (:events snapshot))))

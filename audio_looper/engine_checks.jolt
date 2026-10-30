@@ -141,11 +141,13 @@
       (verify! "last allocated samples remain intact" (== (wav/sample original (+ 147 4064 i) 0)
                                                          (get-in result [:tables 0 i]))))
     (verify! "maximum finalized clip has exact capacity" (= 4096 (first (:lengths result))))
-    (doseq [operations [[{:type :record-start :sample 0 :at-sample 147}
+    (doseq [operations [[{:type :record-start :sample 0 :at-sample 147
+                         :length-samples 1024}]
+                       [{:type :record-start :sample 0 :at-sample 147}
                          {:type :record-finalize :sample 5000 :length-samples 0}]
                         [{:type :record-start :sample 0 :at-sample 147 :seq 1}
                          {:type :record-cancel :sample 2000 :seq 3}]]]
-      (verify! "invalid bounds/operation gap becomes a structured engine failure"
+      (verify! "preselected target, invalid bounds, or operation gap becomes an engine failure"
                (try (perform! {:input input :duration 0.2 :capacity 4096 :detect? false :operations operations} [])
                     false (catch Exception error (= :engine-error (:type (ex-data error)))))))
     (let [duplicate (perform! {:input input :duration 0.2 :capacity 4096 :detect? false
@@ -154,34 +156,7 @@
                                            {:type :record-finalize :sample 3500 :length-samples 3201 :id 2 :seq 2}]} [])]
       (verify! "duplicate native operation is not executed twice"
                (= [:record-started :record-finalized] (mapv :type (:events duplicate)))))
-    (println "PASS native capacity/freeze, zero bounds, sequenced failures, duplicate rejection")))
-
-
-(defn- check-fixed-record-length!
-  [owner]
-  (let [input (generate! owner "fixed-length.wav" "0.24*sin(2*PI*220*t)|0.16*sin(2*PI*330*t)" 0.2)
-        original (wav/read! input)
-        target 1024
-        start 147
-        result (perform! {:input input :duration 0.1 :capacity 4096 :detect? false
-                          :operations [{:type :record-start :sample 0 :at-sample start
-                                        :length-samples target}
-                                       {:type :record-finalize :sample 1800
-                                        :length-samples target}]}
-                         [[100 0 target] [101 0 target]])
-        limit (first (filter #(= :record-limit (:type %)) (:events result)))
-        finalized (first (filter #(= :record-finalized (:type %)) (:events result)))]
-    (verify! "fixed recording auto-freezes at the exact requested sample"
-             (and (= (+ start target) (:sample limit))
-                  (= target (:length-samples limit))
-                  (= 1 (:operation-id limit))))
-    (verify! "native finalization publishes exactly the requested length"
-             (and finalized (= target (:length-samples finalized)) (= target (first (:lengths result)))))
-    (doseq [frame (range target) channel (range 2)]
-      (verify! "fixed-length capture preserves every stereo PCM sample"
-               (== (wav/sample original (+ start frame) channel)
-                   (get-in result [:tables channel frame]))))
-    (println "PASS native fixed-cycle recorder auto-finalizes at its exact sample boundary")))
+    (println "PASS native capacity/freeze, no preselected target, bounds, sequences and duplicates")))
 
 
 (defn- check-voice!
@@ -251,21 +226,80 @@
     (println "PASS queued playback cancellation, start race and operation correlation")))
 
 
+(def ^:private scrape-edges
+  [42 47 51 56 61 67 72 78 85 91 99 106 114 123 132 141 151 162 173 185 198 211 225 240 256])
+
+
+(def ^:private scrape-training-profiles
+  [[0.185253167184 0.200821542724 0.156959876949 0.132331137222
+    0.148099032842 0.215137846665 0.246058444516 0.340098933988
+    0.446482545680 0.250779214161 0.255769452367 0.096866655065
+    0.073562245643 0.095720828119 0.087905585145 0.090063584194
+    0.139345558486 0.225646918732 0.433234084986 0.059868059079
+    0.057137028447 0.049983878927 0.054274652016 0.031704550879]
+   [0.119191177319 0.153718506325 0.083605515185 0.107136994225
+    0.151316285181 0.197550904396 0.288298842348 0.294161937656
+    0.325157880391 0.294837306417 0.297337635063 0.147492935818
+    0.083345993598 0.106725630313 0.094560405072 0.093394078679
+    0.140345191877 0.277643405111 0.493134262088 0.104671902169
+    0.091710123674 0.079352295413 0.082096162915 0.030599137373]
+   [0.078599534168 0.065034255140 0.047646788328 0.047097441451
+    0.066339798518 0.154874310318 0.244627124859 0.230692942213
+    0.411851954975 0.288434528596 0.341891088130 0.070193863306
+    0.118730204339 0.116012376179 0.067325577094 0.072926204787
+    0.132058276152 0.303677812365 0.542190626757 0.087722172969
+    0.076103175154 0.074746237772 0.087940811062 0.034321270345]
+   [0.059209753371 0.075558677959 0.066012951930 0.042542167094
+    0.095018171655 0.150695450901 0.168558083822 0.215238782012
+    0.469211491412 0.268695783929 0.375126926711 0.192996753576
+    0.126218635741 0.184459802082 0.167012357197 0.117613914108
+    0.172604358651 0.293339749083 0.416861517745 0.094193252757
+    0.073701484970 0.061628462119 0.088616412720 0.023741781210]
+   [0.134398433253 0.133503441983 0.087458999768 0.061181242158
+    0.136551276013 0.136768753972 0.215694203122 0.206423443088
+    0.475204593093 0.203265908914 0.274144304796 0.074403004508
+    0.080796899585 0.168677979895 0.042649053050 0.055590909088
+    0.108794567731 0.249617781856 0.592979087922 0.069961589083
+    0.062359466474 0.036663399498 0.046199280031 0.022060578955]
+   [0.088217087982 0.085439722807 0.060649391341 0.106426839893
+    0.121923326678 0.246074398601 0.217185528784 0.312556367433
+    0.325381205681 0.363624458924 0.253867641911 0.100284156188
+    0.053488659171 0.076312117761 0.051257327420 0.050088577669
+    0.094401587760 0.284159205753 0.543903205255 0.099922455772
+    0.094558085809 0.104039465585 0.082047714802 0.035229731691]])
+
+
+(defn- scrape-expression
+  [profile]
+  (str/join "+"
+            (mapcat (fn [group]
+                      (for [bin (range (nth scrape-edges group) (nth scrape-edges (inc group)))]
+                        (format "%.12f*sin(2*PI*%.9f*t+%.5f)"
+                                (* 0.006 (nth profile group))
+                                (* (+ bin 0.21) (/ 44100.0 2048))
+                                (* 0.1 (mod (* bin 739) 63)))))
+                    (range 24))))
+
+
 (defn- check-scrape!
   [owner]
-  (let [edges [42 47 51 56 61 67 72 78 85 91 99 106 114 123 132 141 151 162 173 185 198 211 225 240 256]
-        terms (mapcat (fn [group]
-                        (for [bin (range (nth edges group) (nth edges (inc group)))]
-                          (format "%.12f*sin(2*PI*%.9f*t+%.5f)"
-                                  (* 0.006 (nth scrape/template group))
-                                  (* (+ bin 0.21) (/ 44100.0 2048)) (* 0.1 (mod (* bin 739) 63)))))
-                      (range 24))
-        wave (str "if(between(t,1.5,1.9)," (str/join "+" terms)
+  (let [template-wave (scrape-expression scrape/template)
+        wave (str "if(between(t,1.5,1.9)," template-wave
                   ",if(between(t,1,1.3),0.1*sin(2*PI*220*t),0))")
         fixture (generate! owner "scrape-synth.wav" (str wave "|-1*(" wave ")") 3)
         started {:type :record-start :sample 0 :at-sample 64 :id 7}
         opts {:input fixture :capacity 132300 :duration 3 :detect? false}
         no-record (perform! opts [])
+        varied-wave (str/join "+"
+                              (map-indexed
+                                (fn [index profile]
+                                  (let [start (+ 1.5 index)]
+                                    (str "if(between(t," start "," (+ start 0.3) "),("
+                                         (scrape-expression profile) "),0)")))
+                                scrape-training-profiles))
+        varied (generate! owner "scrape-six.wav" (str varied-wave "|-1*(" varied-wave ")") 8)
+        varied-result (perform! (assoc opts :input varied :duration 8) [])
+        varied-matches (filter #(= :scrape (:type %)) (:events varied-result))
         recording (perform! (assoc opts :operations [started]) [])
         matches (filter #(= :scrape (:type %)) (:events recording))
         event (first matches)
@@ -285,6 +319,10 @@
     (verify! "scrape is published globally without a recorder"
              (let [event (first (filter #(= :scrape (:type %)) (:events no-record)))]
                (and event (= 0 (:loop-id event)) (= 0 (:operation-id event)))))
+    (verify! "six measured scrape profiles each produce one recognized gesture"
+             (and (= 6 (count varied-matches))
+                  (= [1 2 3 4 5 6]
+                     (mapv #(long (/ (:onset-sample %) 44100)) varied-matches))))
     (verify! "Csound detects one phase-inverted stereo scrape with recorder correlation"
              (and (= 1 (count matches)) (= 1 (:loop-id event)) (= 7 (:operation-id event))
                   (<= 64000 (:onset-sample event) 67000) (< (:onset-sample event) (:sample event))))
@@ -296,7 +334,7 @@
     (verify! "stationary pitched tone and broadband noise do not trigger scrape"
              (and (not-any? #(= :scrape (:type %)) (:events negative))
                   (not-any? #(= :scrape (:type %)) (:events noise-result))))
-    (println "PASS Csound scrape recognition, stereo power, event correlation and negative tone")))
+    (println "PASS six-profile Csound scrape recognition, stereo power, correlation and negatives")))
 
 
 (defn- check-assets!
@@ -325,7 +363,6 @@
       (check-silence-trim! owner)
       (check-six! owner)
       (check-capacity! owner)
-      (check-fixed-record-length! owner)
       (check-voice! owner)
       (check-detector! owner)
       (check-playback-cancel! owner)

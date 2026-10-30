@@ -26,7 +26,6 @@
    :already-stopped "Already stopped."})
 (def cancelled-text
   {:timeout "Command timed out."
-   :invalid-record-length "Invalid recording length. Command cancelled."
    :no-complete-cycle "Keep recording. No complete cycle was captured."
    :invalid-operation "Invalid action. Command cancelled."
    :out-of-tune "Control note is out of tune. Command cancelled."
@@ -37,18 +36,12 @@
 (defn phrases
   []
   (into {[:ready] "Select looper, or scrape to exit."
-         [:record-length] "Select one to six master cycles using scale degrees one to six."
          [:command-cancelled] "Command cancelled."
          [:engine-failure] "Audio engine failure."}
         (concat
-          (for [cycles (range 1 7)]
-            [[:recording-length-selected cycles]
-             (str (nth numbers (dec cycles))
-                  (if (= cycles 1) " cycle selected. Release the guitar and wait for the cue."
-                      " cycles selected. Release the guitar and wait for the cue."))])
           (for [id (range 1 7)
                 [prompt tail] {:loop-selected "selected."
-                               :recording-armed "recording armed. Release the guitar and wait for the cue."
+                               :recording-armed "recording armed. Release the guitar, wait for the cue, and scrape low E to finish."
                                :recording "recording." :recorded "recorded."
                                :playing "playing." :stopped "stopped."
                                :erased "erased." :maximum-reached "maximum recording length reached."
@@ -64,10 +57,9 @@
 
 
 (defn key-for
-  [{:keys [prompt loop-id operation reason cycles]}]
+  [{:keys [prompt loop-id operation reason]}]
   (cond
     (= :playback-queued prompt) [prompt loop-id operation]
-    (= :recording-length-selected prompt) [prompt cycles]
     (#{:rejected :no-op} prompt) [prompt reason]
     (= :command-cancelled prompt)
     (cond (get rejection-text reason) [:rejected reason]

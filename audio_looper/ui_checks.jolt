@@ -144,6 +144,23 @@
              (some #(str/starts-with? % "LIVE CAPTURE:") (setup/prompt scale true)))))
 
 
+(defn- check-restored-setup!
+  []
+  (let [profile (control/profile [62 64 65 67 69 70 72 74] [74 77 74])
+        initial (assoc (setup/initial-state inventory) :saved-profile profile)
+        fx (setup/step initial {:type :line :text "1"})
+        mic (setup/step initial {:type :line :text "2"})
+        ready (setup/step mic {:type :line :text "y"})]
+    (verify! "restored profile skips live recapture but still selects a current input"
+             (and (= :ready (:stage fx)) (= profile (:profile fx))
+                  (= "fx" (get-in fx [:input :uid]))))
+    (verify! "loading a session cannot bypass microphone/headphone safety"
+             (and (= :headphones (:stage mic)) (= :ready (:stage ready))
+                  (:headphones? ready) (false? (:monitor? ready))))
+    (verify! "resolved restored profile is retained"
+             (= profile (:profile (setup/resolve-session ready inventory))))))
+
+
 (defn- check-dashboard!
   []
   (let [state (-> (control/initial-state)
@@ -210,6 +227,7 @@
 (defn check-ui!
   []
   (check-setup!)
-  (println "PASS setup/device identity/custom capture/headphone policy")
+  (check-restored-setup!)
+  (println "PASS setup/device identity/custom capture/restored profile/headphone policy")
   (check-dashboard!)
   (println "PASS dashboard/policy menu/10fps/plain logs/terminal sanitization"))

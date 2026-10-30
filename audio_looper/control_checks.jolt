@@ -414,72 +414,48 @@
                  (= :prompt-cancel (:type (first effects)))))))
 
 
-(defn- check-fixed-length-recording!
+(defn- check-scrape-length-recording!
   []
   (let [master (ready-state)
-        [asked _] (command master 2 1)
-        waiting (settle asked)
-        menu (control/navigation waiting)
-        [selected _] (note waiting (nth (get-in waiting [:profile :selectors]) 2))
-        armed (settle selected)
-        start (get-in armed [:slots 1 :pending])
-        target (* 3 (get-in master [:master :length-samples]))
-        [recording _] (send armed :record-started (+ (:at-sample start) 32)
+        [armed effects] (command master 2 1)
+        queued (settle armed)
+        start (get-in queued [:slots 1 :pending])
+        [recording _] (send queued :record-started (+ (:at-sample start) 32)
                             {:loop-id 2 :operation-id (:id start) :start-sample (:at-sample start)})
-        limit-sample (+ (:at-sample start) target)
-        [finalizing effects] (send recording :record-limit limit-sample
-                                   {:loop-id 2 :operation-id (:id start) :length-samples target})
+        master-length (get-in master [:master :length-samples])
+        scrape-onset (+ (:at-sample start) (* 3 master-length) 10000)
+        [finalizing stop-effects] (send recording :scrape (+ scrape-onset 6000)
+                                        {:loop-id 2 :operation-id (:id start)
+                                         :onset-sample scrape-onset})
         finalize (get-in finalizing [:slots 1 :pending])
-        [ready _] (send finalizing :record-finalized (+ limit-sample 32)
+        [ready _] (send finalizing :record-finalized (+ (:sample finalizing) 32)
                         {:loop-id 2 :operation-id (:id finalize) :buffer :three-cycles
-                         :length-samples target})]
-    (check! "non-master recording asks for cycle count before arming"
-            (= :wait-record-length (:phase (:parser waiting))))
-    (let [selected (select-loop master 2)
-          [auto effects] (control/step selected {:type :tick :sample (+ (get-in selected [:parser :deadline])
-                                                                         control/action-confirmation-grace)})
-          [cancelled cancel-effects] (send auto :scrape (+ (:sample auto) 10000)
-                                           {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample auto) 1000)})]
-      (check! "default recording with a master requests fixed cycle length"
-              (and (= :record-length (:prompt (first effects)))
-                   (= :wait-record-length (get-in auto [:voice :next]))))
-      (check! "scrape cancels cycle selection even during prompt"
-              (and (= :cooldown (get-in cancelled [:parser :phase])) (nil? (:active-recorder cancelled))
-                   (= :prompt-cancel (:type (first cancel-effects))))))
-    (check! "cycle count menu maps scale degrees to one through six T"
-            (= (range 1 7) (map :cycles menu)))
-    (check! "chosen three-T length is scheduled with the recorder"
-            (= target (:length-samples start)))
-    (check! "native limit event finalizes exactly at the selected cycle count"
-            (and (some #(= :record-finalize (:type %)) effects)
-                 (= target (:length-samples finalize))
-                 (= limit-sample (:boundary-sample finalize))))
-    (check! "automatic completion publishes the clip with its actual cycle count"
+                         :length-samples (:length-samples finalize)})]
+    (check! "non-master recording arms without asking for a cycle count"
+            (and (= :recording-armed (:prompt (first effects)))
+                 (= :arm-start (get-in armed [:voice :next]))))
+    (check! "non-master recorder has no fixed target length"
+            (nil? (:length-samples start)))
+    (check! "scrape chooses the latest complete master-cycle boundary"
+            (and (= (* 3 master-length) (:length-samples finalize))
+                 (= (+ (:at-sample start) (* 3 master-length))
+                    (:boundary-sample finalize))
+                 (some #(= :record-finalize (:type %)) stop-effects)))
+    (check! "finalization publishes the cycle count derived from scrape timing"
             (and (= :ready (get-in ready [:slots 1 :clip-state]))
                  (= 3 (get-in ready [:slots 1 :record-cycles]))
-                 (= target (get-in ready [:slots 1 :length-samples]))))
-    (let [long-master (assoc master :master {:origin-sample 0 :length-samples (* 30 44100)})
-          long-waiting (assoc-in long-master [:parser :phase] :wait-record-length)
-          limited (control/navigation long-waiting)
-          [asked-too-long _] (command long-master 2 1)
-          too-long-state (settle asked-too-long)
-          [rejected _] (note too-long-state (nth (:selectors (:profile too-long-state)) 4))]
-      (check! "cycle choices exceeding recorder capacity are disabled"
-              (= [true true true true false false] (mapv :enabled? limited)))
-      (check! "an unavailable cycle count is rejected without arming"
-              (and (nil? (:active-recorder rejected))
-                   (= :empty (get-in rejected [:slots 1 :clip-state])))))
+                 (= (* 3 master-length) (get-in ready [:slots 1 :length-samples]))))
+    (let [early-onset (+ (:at-sample start) (dec master-length))
+          [continuing early-effects] (send recording :scrape (+ early-onset 6000)
+                                           {:loop-id 2 :operation-id (:id start)
+                                            :onset-sample early-onset})]
+      (check! "scrape before one complete cycle keeps the recorder running"
+              (and (= :recording (get-in continuing [:slots 1 :record-state]))
+                   (not-any? #(= :record-finalize (:type %)) early-effects))))
     (let [too-large (assoc master :master {:origin-sample 0
                                            :length-samples (inc control/capacity-samples)})]
       (check! "record start is disabled when no complete master cycle fits"
-              (false? (:enabled? (control/policy too-large 2 1)))))
-    (let [[asked _] (command master 2 1)
-          waiting (settle asked)
-          expired (first (control/step waiting {:type :tick
-                                                :sample (get-in waiting [:parser :deadline])}))]
-      (check! "timing out at cycle selection cancels before recorder arming"
-              (and (nil? (:active-recorder expired))
-                   (= :empty (get-in expired [:slots 1 :clip-state])))))))
+              (false? (:enabled? (control/policy too-large 2 1)))))))
 
 
 (defn- check-destructive!
@@ -564,21 +540,19 @@
         [queued _] (control/step guarded {:type :tick :sample now})]
     (check! "delayed host never schedules recording in the past"
             (<= now (get-in queued [:slots 0 :pending :at-sample]))))
-  (let [[asked _] (command (ready-state) 2 1)
-        waiting (settle asked)
-        [selected _] (note waiting (first (get-in waiting [:profile :selectors])))
-        queued (settle selected)
+  (let [[armed _] (command (ready-state) 2 1)
+        queued (settle armed)
         now (:sample queued)
         at (get-in queued [:slots 1 :pending :at-sample])
         [cancelled _] (send queued :scrape (+ (:sample queued) 10000)
                             {:loop-id 2 :operation-id (get-in queued [:slots 1 :pending :id])
                              :onset-sample (+ (:sample queued) 1000)})]
-    (check! "later recording requests a master-cycle count before arming"
-            (= :wait-record-length (get-in waiting [:parser :phase])))
+    (check! "later recording arms directly without a cycle-selection phase"
+            (= :record-start (get-in queued [:slots 1 :pending :type])))
     (check! "later recording starts strictly on next shared boundary"
             (and (> at now) (zero? (mod at 44100)) (< (- at now) 44101)))
-    (check! "one selected cycle is sent to the native recorder"
-            (= 44100 (get-in queued [:slots 1 :pending :length-samples])))
+    (check! "later recorder remains open until scrape"
+            (nil? (get-in queued [:slots 1 :pending :length-samples])))
     (check! "armed recorder can be cancelled without publishing a take"
             (and (= :record-cancel (get-in cancelled [:slots 1 :pending :type]))
                  (= :empty (get-in cancelled [:slots 1 :clip-state])))))
@@ -685,7 +659,7 @@
                          ["record/finalize policy" check-recording!]
                          ["scrape stop" check-scrape-stop!]
                          ["global scrape stop and compact grammar" check-global-stop!]
-                         ["fixed-cycle recording and automatic finalization" check-fixed-length-recording!]
+                         ["scrape-timed cycle recording" check-scrape-length-recording!]
                          ["direct erase and scrape exit" check-destructive!]
                          ["six-slot playback policy" check-playback!]
                          ["synchronization/capacity" check-boundaries!]

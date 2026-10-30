@@ -2,6 +2,7 @@
 *.aiff
 .clj-kondo/
 .DS_Store
+/sessions/
 /guitar-looper
 /guitar-loop.csd
 /guitar-loop.csd.*
