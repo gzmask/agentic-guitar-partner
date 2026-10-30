@@ -94,6 +94,16 @@
          :diagnostics-free (ffi/foreign-fn "looperDiagnosticsFree" [:pointer] :void)
          :load-mono-table (ffi/foreign-fn "looperLoadMonoTable"
                                            [:pointer :int :pointer :int] :int :blocking)
+         :bind-track-tables (ffi/foreign-fn "looperBindTrackTables" [:pointer :int] :int)
+         :validate-track (ffi/foreign-fn "looperValidateTrack" [:pointer :int] :int :blocking)
+         :load-track (ffi/foreign-fn "looperLoadTrack" [:pointer :int :pointer :int] :int :blocking)
+         :save-track (ffi/foreign-fn "looperSaveTrack"
+                                    [:pointer :int :pointer :int :int] :int :blocking)
+         :playback-gain (ffi/foreign-fn "looperTrackPlaybackGain" [:pointer :int :int :int] :double :blocking)
+         :format-local-time (ffi/foreign-fn "looperFormatLocalTime" [:long :pointer :int] :int)
+         :session-lock (ffi/foreign-fn "looperSessionLock" [:pointer] :int :blocking)
+         :session-unlock (ffi/foreign-fn "looperSessionUnlock" [:int] :void)
+         :commit-file (ffi/foreign-fn "looperCommitFile" [:pointer :pointer :pointer] :int :blocking)
          :initialize (ffi/foreign-fn "csoundInitialize" [:int] :int)
          :create (ffi/foreign-fn "csoundCreate" [:pointer] :pointer)
          :compile (ffi/foreign-fn "csoundCompileCsdText" [:pointer :pointer] :int :blocking)
@@ -298,6 +308,120 @@
           (when-not (zero? code)
             (fail! :assets "Cannot bulk-load validated prompt into its engine table."
                    {:table table :frames frames :code code}))))))
+  nil)
+
+
+(defn bind-track-tables!
+  [instance capacity]
+  (locking instance
+    (let [{:keys [api pointer phase]} (usable! instance)]
+      (when-not (and (= :started phase) (integer? capacity) (<= 1 capacity 5292000))
+        (fail! :lifecycle "Track tables bind only before performance." {}))
+      (when-not (zero? ((:bind-track-tables api) pointer capacity))
+        (fail! :persistence "Cannot bind fixed PCM track tables." {}))))
+  nil)
+
+
+(defn validate-track!
+  [path frames]
+  (when-not (and (integer? frames) (<= 1 frames 5292000))
+    (fail! :persistence "Invalid persisted track length." {}))
+  (with-open [arena (ffi/confined-arena)]
+    (let [filename (ffi/string->ptr arena path)
+          code ((:validate-track @api) filename frames)]
+      (when-not (zero? code)
+        (fail! :persistence "Invalid, truncated, or non-finite stereo float64 WAV."
+               {:file path :code code}))))
+  nil)
+
+
+(defn load-track!
+  [instance slot path frames]
+  (locking instance
+    (let [{:keys [api pointer phase]} (usable! instance)]
+      (when-not (and (= :started phase) (integer? slot) (<= 1 slot 6)
+                     (integer? frames) (<= 1 frames 5292000))
+        (fail! :lifecycle "Track loading is startup-only and bounded." {}))
+      (with-open [arena (ffi/confined-arena)]
+        (let [filename (ffi/string->ptr arena path)
+              code ((:load-track api) pointer (dec slot) filename frames)]
+          (when-not (zero? code)
+            (fail! :persistence "Cannot restore persisted PCM track." {:file path :code code}))))))
+  nil)
+
+
+(defn save-track!
+  "Host-thread bulk export of a finalized, immutable clip. The caller owns the
+  slot until return; no sample loop, file I/O or allocation on the audio thread."
+  [instance slot path offset frames]
+  (locking instance
+    (let [{:keys [api diagnostics phase]} (usable! instance)]
+      (when-not (and (= :performing phase) (integer? slot) (<= 1 slot 6)
+                     (integer? offset) (<= 0 offset 5292000)
+                     (integer? frames) (<= 1 frames 5292000)
+                     (== frames (control instance (str "slot/" (dec slot) "/length"))))
+        (fail! :persistence "Only acknowledged immutable tracks may be exported." {}))
+      (with-open [arena (ffi/confined-arena)]
+        (let [filename (ffi/string->ptr arena path)
+              code ((:save-track api) diagnostics (dec slot) filename offset frames)]
+          (when-not (zero? code)
+            (fail! :persistence "Cannot save stereo PCM track." {:file path :code code}))))))
+  nil)
+
+
+(defn playback-gain!
+  "Bounded host-thread measurement, never per-block DSP. The caller must own an
+  immutable finalized/loaded clip until return; the same gain covers L/R."
+  [instance slot offset frames]
+  (locking instance
+    (let [{:keys [api diagnostics phase]} (usable! instance)]
+      (when-not (and (#{:started :performing} phase) (integer? slot) (<= 1 slot 6)
+                     (integer? offset) (<= 0 offset 5292000)
+                     (integer? frames) (<= 1 frames 5292000))
+        (fail! :playback-gain "Invalid immutable clip measurement." {}))
+      (let [gain ((:playback-gain api) diagnostics (dec slot) offset frames)]
+        (when-not (<= 1.0 gain 16.0)
+          (fail! :playback-gain "Cannot measure playback makeup gain." {:code gain}))
+        gain))))
+
+
+(defn local-timestamp
+  "Filesystem-safe local wall-clock name, honoring the OS timezone or TZ."
+  [milliseconds]
+  (when-not (and (integer? milliseconds) (<= 0 milliseconds 253402300799999))
+    (fail! :persistence "Invalid session creation time." {}))
+  (with-open [arena (ffi/confined-arena)]
+    (let [buffer (ffi/alloc arena 32)
+          code ((:format-local-time @api) (quot milliseconds 1000) buffer 32)]
+      (when-not (zero? code) (fail! :persistence "Cannot format the local session time." {:code code}))
+      (ffi/ptr->string buffer))))
+
+
+(defn lock-session!
+  [path]
+  (with-open [arena (ffi/confined-arena)]
+    (let [filename (ffi/string->ptr arena path)
+          fd ((:session-lock @api) filename)]
+      (when (neg? fd) (fail! :persistence "Session is already open or cannot be locked." {:file path}))
+      fd)))
+
+
+(defn unlock-session!
+  [fd]
+  ((:session-unlock @api) fd)
+  nil)
+
+
+(defn commit-file!
+  [temporary destination directory]
+  (with-open [arena (ffi/confined-arena)]
+    (let [source (ffi/string->ptr arena temporary)
+          target (ffi/string->ptr arena destination)
+          parent (ffi/string->ptr arena directory)
+          code ((:commit-file @api) source target parent)]
+      (when-not (zero? code)
+        (fail! :persistence "Cannot atomically commit session file."
+               {:file destination :code code}))))
   nil)
 
 

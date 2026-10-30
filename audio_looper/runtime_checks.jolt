@@ -4,6 +4,7 @@
             [audio-looper.csound :as native]
             [audio-looper.engine :as engine]
             [audio-looper.runtime :as runtime]
+            [audio-looper.sessions :as sessions]
             [clojure.string :as str]))
 
 
@@ -124,10 +125,16 @@
                         "ev/1/id" 9 "ev/1/slot" 2 "ev/1/a" 90
                         "ev/1/b" 0 "ev/1/c" 0 "ev/1/d" 0 "ev/1/e" 0})
         writes (atom [])
+        measurements (atom [])
         running {:instance :fake
                  :transport (atom {:event-seq 0 :next-seq 1 :in-flight nil
-                                   :queue [] :held nil :last-note-id 0})}]
-    (with-redefs [native/check-health! (fn [_] nil)
+                                   :queue [] :held nil :last-note-id 0
+                                   :clips {2 {:offset-samples 73 :length-samples 6000}}
+                                   :playback-gains {2 12.5}})}]
+    (with-redefs [native/playback-gain! (fn [_ slot offset frames]
+                                          (swap! measurements conj [slot offset frames])
+                                          12.5)
+                  native/check-health! (fn [_] nil)
                   native/control (fn [_ channel] (get @channels channel 0))
                   native/set-control! (fn [_ channel value]
                                         (swap! writes conj [channel value])
@@ -144,7 +151,9 @@
         (verify! "host payload is published before its sequence"
                  (and (= ["h/seq" 1] (last host-writes))
                       (= 4 (get @channels "h/op")) (= 20 (get @channels "h/id"))
-                      (= 1 (get @channels "h/slot")) (= 9000 (get @channels "h/at")))))
+                      (= 1 (get @channels "h/slot")) (= 9000 (get @channels "h/at"))
+                      (= 12.5 (get @channels "h/arg")))))
+      (verify! "loaded gain never scans PCM on a timed playback request" (empty? @measurements))
       (engine/enqueue! running {:type :playback-stop :id 21 :loop-id 2 :at-sample 12000})
       (engine/poll! running)
       (verify! "unacknowledged host operation applies backpressure"
@@ -159,34 +168,102 @@
       (engine/poll! running)
       (verify! "playback cancellation transports the original operation ID"
                (and (= 3 (get @channels "h/seq")) (= 10 (get @channels "h/op"))
-                    (= 22 (get @channels "h/id")) (= 21 (get @channels "h/arg")))))))
+                    (= 22 (get @channels "h/id")) (= 21 (get @channels "h/arg"))))
+      (engine/enqueue! running {:type :playback-start :id 23 :loop-id 2 :at-sample 15000})
+      (verify! "immutable clip gain is cached across play requests" (empty? @measurements))
+      (engine/discard-queued! running)
+      (swap! channels merge {"e/write" 2 "ev/2/seq" 2 "ev/2/type" 8
+                             "ev/2/sample" 120 "ev/2/id" 24 "ev/2/slot" 2})
+      (engine/poll! running)
+      (verify! "native erase invalidates both retained range and cached gain"
+               (and (nil? (get-in @(:transport running) [:clips 2]))
+                    (nil? (get-in @(:transport running) [:playback-gains 2]))))
+      (swap! channels merge {"e/write" 3 "ev/3/seq" 3 "ev/3/type" 4
+                             "ev/3/sample" 140 "ev/3/id" 25 "ev/3/slot" 2
+                             "ev/3/a" 7000 "ev/3/b" 123 "slot/1/length" 7000})
+      (engine/poll! running)
+      (verify! "new finalization measures exactly its retained range before any timed play request"
+               (= [[2 123 7000]] @measurements))
+      (engine/enqueue! running {:type :playback-start :id 26 :loop-id 2 :at-sample 18000})
+      (verify! "new playback reuses the premeasured gain without spending scheduling lead"
+               (= [[2 123 7000]] @measurements)))))
 
 
-(defn- check-scrape-transport!
+(defn- check-cancel-transport!
   []
-  (let [channels (atom {"engine/clock" 110000 "e/write" 1 "engine/fatal" 0 "h/ack" 0
-                        "ev/1/seq" 1 "ev/1/type" 12 "ev/1/sample" 110000
-                        "ev/1/id" 7 "ev/1/slot" 1 "ev/1/a" 101000 "ev/1/b" 0.95})
+  (let [events [[1 103500 1 71 101000 0]
+                [2 111500 1 109000 2 0]
+                [1 111500 2 69 109000 0]
+                [2 119500 2 117000 2 0]
+                [1 119500 3 71 117000 0]
+                [2 127500 3 125000 2 0]
+                [1 127500 4 69 125000 0]]
+        channels (atom (reduce (fn [channels [index [type sample id a b c]]]
+                                 (let [sequence (inc index)
+                                       prefix (str "ev/" sequence "/")]
+                                   (reduce-kv (fn [channels field value] (assoc channels (str prefix field) value))
+                                              channels {"seq" sequence "type" type "sample" sample "id" id
+                                                        "slot" 0 "a" a "b" b "c" c "d" 0 "e" -20})))
+                               {"engine/clock" 127520 "e/write" 7 "engine/fatal" 0 "h/ack" 0}
+                               (map-indexed vector events)))
         running {:instance :fake :transport (atom {:event-seq 0 :next-seq 1 :in-flight nil :queue []})}]
     (with-redefs [native/check-health! (fn [_] nil)
                   native/control (fn [_ channel] (get @channels channel 0))
                   native/set-control! (fn [_ channel value] (swap! channels assoc channel value))
                   native/finished? (fn [_] false)]
       (let [snapshot (engine/poll! running)
-            event (first (:events snapshot))
             state (-> (control/initial-state)
-                      (assoc :sample 100000 :active-recorder 1)
+                      (assoc :sample 100000 :active-recorder 1 :effect-seq 7)
                       (assoc-in [:slots 0 :record-state] :recording)
                       (assoc-in [:slots 0 :record-start-id] 7)
                       (assoc-in [:slots 0 :start-sample] 10000))
-            [state effects] (control/step state event)]
-        (verify! "scrape decodes recorder id and onset before ring acknowledgement"
-                 (and (= 1 (get @channels "e/ack")) (= 7 (:operation-id event))
-                      (= 101000 (:onset-sample event))))
-        (verify! "scrape transport requests finalization at the gesture onset"
-                 (and (= :record-finalize (:type (first effects)))
+            [state _] (runtime/apply-events! running (atom {}) state (:events snapshot))
+            operation (first (:queue @(:transport running)))]
+        (verify! "word reuses ordered native note events, not an acoustic gesture event"
+                 (and (= 7 (get @channels "e/ack"))
+                      (= [71 69 71 69] (mapv :midi (filter #(= :note-on (:type %)) (:events snapshot))))))
+        (verify! "confirmed word queues a correlated finalize using the first note onset"
+                 (and (= :record-finalize (:type operation)) (= 1 (:loop-id operation))
                       (= 101000 (get-in state [:slots 0 :pending :boundary-sample]))
-                      (= :empty (get-in state [:slots 0 :clip-state]))))))))
+                      (= :empty (get-in state [:slots 0 :clip-state]))))
+        (engine/poll! running)
+        (verify! "normal sequenced host mailbox carries word finalization"
+                 (and (= 1 (get @channels "h/seq")) (= 2 (get @channels "h/op"))
+                      (= (:id operation) (get @channels "h/id"))
+                      (= 91000 (get @channels "h/length"))))))))
+
+
+(defn- check-persistence-boundary!
+  []
+  (let [{:keys [running cache] :as fixture} (fixture)
+        running (assoc running :session-store :store)
+        writes (atom [])
+        recording (-> (runtime/initial-state control/default-profile)
+                      (assoc :active-recorder 1)
+                      (assoc-in [:slots 0 :record-state] :finalizing)
+                      (assoc-in [:slots 0 :start-sample] 0)
+                      (assoc-in [:slots 0 :pending]
+                                {:type :record-finalize :id 7 :length-samples 512
+                                 :boundary-sample 512 :trim? true}))
+        event {:type :record-finalized :sample 600 :seq 1 :loop-id 1
+               :operation-id 7 :length-samples 512 :buffer [1 7 0]}
+        checkpoint (fn [_ _ before after]
+                     (when-not (= (get-in before [:slots 0 :buffer])
+                                   (get-in after [:slots 0 :buffer]))
+                       (swap! writes conj :save)))]
+    (with-redefs [sessions/checkpoint! checkpoint]
+      (with-transport fixture
+        #(do
+           (runtime/apply-events! running cache recording [(assoc event :operation-id 99)])
+           (verify! "unmatched finalization acknowledgement never saves PCM" (empty? @writes))
+           (let [[ready _] (runtime/apply-events! running cache recording [event])]
+             (verify! "accepted native finalization saves immediately" (= [:save] @writes))
+             (runtime/apply-events! running cache ready [event])
+             (verify! "duplicate acknowledgement never saves twice" (= [:save] @writes))))))
+    (with-redefs [sessions/checkpoint! (fn [& _] (throw (ex-info "Disk full" {:type :session-error})))]
+      (verify! "persistence failure propagates instead of claiming success"
+               (try (runtime/apply-events! running cache recording [event]) false
+                    (catch Exception error (= :session-error (:type (ex-data error)))))))))
 
 
 (defn check-runtime!
@@ -196,5 +273,6 @@
   (check-terminal-engine-states!)
   (check-quit-priority!)
   (check-engine-transport!)
-  (check-scrape-transport!)
-  (println "PASS runtime reducer/effect dispatch, correlation, quit priority and engine endings"))
+  (check-cancel-transport!)
+  (check-persistence-boundary!)
+  (println "PASS runtime dispatch, ack-only persistence, correlation, quit priority and engine endings"))

@@ -6,6 +6,7 @@
     [audio-looper.dashboard :as dashboard]
     [audio-looper.engine :as engine]
     [audio-looper.runtime :as runtime]
+    [audio-looper.sessions :as sessions]
     [audio-looper.setup :as setup]
     [audio-looper.voice :as voice]
     [clojure.string :as str]
@@ -161,8 +162,8 @@
 
 
 (defn- configure!
-  [terminal deadline live-capture? cache]
-  (loop [state (setup/initial-state (native/audio-devices!))]
+  [terminal deadline live-capture? cache & [saved-profile]]
+  (loop [state (assoc (setup/initial-state (native/audio-devices!)) :saved-profile saved-profile)]
     (when (:ansi? @terminal) (write! "\u001b[H\u001b[2J"))
     (write! (str (str/join "\n" (map dashboard/safe-text
                                        (setup/prompt state live-capture?))) "\n"))
@@ -182,6 +183,49 @@
       (let [line (line! terminal deadline)]
         (when-not (= :eof line)
           (recur (setup/step state {:type :line :text line})))))))
+
+
+(defn- choose-session!
+  "Browse metadata, then validate/lock a chosen load before device setup.
+  New directories wait until setup succeeds; this menu never opens audio."
+  [terminal deadline]
+  (loop [stage :choose page 0 message nil]
+    (let [entries (sessions/list! sessions/default-root)
+          pages (max 1 (long (Math/ceil (/ (count entries) 10.0))))
+          page (min page (dec pages))
+          visible (vec (take 10 (drop (* page 10) entries)))]
+      (when (:ansi? @terminal) (write! "\u001b[H\u001b[2J"))
+      (write! (str "LOOPER SESSIONS\nStorage: " (dashboard/safe-text sessions/default-root) "\n"
+                   (if (= stage :choose)
+                     "[Enter/n] New session   [l] Load previous session   [q] Quit\n"
+                     (str "Previous sessions (page " (inc page) "/" pages "):\n"
+                          (str/join "\n"
+                                    (map-indexed
+                                      (fn [i entry]
+                                        (str (inc i) ". "
+                                             (dashboard/safe-text
+                                               (if (:error entry) (str (:directory entry) " [unavailable: " (:error entry) "]")
+                                                 (str (get-in entry [:metadata :id]) "  tracks="
+                                                      (count (get-in entry [:metadata :tracks]))))))) visible))
+                          "\nNumber to load; ] next page; [ previous page; b back; q quit.\n"))
+                   (when message (str (dashboard/safe-text message) "\n"))))
+      (let [line (line! terminal deadline)]
+        (cond
+          (or (= :eof line) (= "q" line)) nil
+          (and (= stage :choose) (#{"" "n"} line)) {:new? true}
+          (and (= stage :choose) (= "l" line)) (recur :list 0 nil)
+          (and (= stage :list) (= "]" line)) (recur :list (min (inc page) (dec pages)) nil)
+          (and (= stage :list) (= "[" line)) (recur :list (max 0 (dec page)) nil)
+          (= "b" line) (recur :choose 0 nil)
+          (and (= stage :list) (re-matches #"[0-9]+" line))
+          (let [index (parse-long line)
+                entry (when (and index (<= 1 index (count visible))) (nth visible (dec index)))
+                result (when (and entry (not (:error entry)))
+                         (try {:store (sessions/open! (:directory entry))}
+                              (catch Exception error {:error (ex-message error)})))]
+            (if (:store result) result
+              (recur :list page (or (:error result) (:error entry) "Choose a valid session number."))))
+          :else (recur stage page "Choose one of the displayed options."))))))
 
 
 (defn- default-preview-session
@@ -210,22 +254,26 @@
   (write! (str "\nSTARTING LIVE PCM LOOPER\nInput: "
                (dashboard/safe-text (get-in session [:input :name]))
                "\nOutput: " (dashboard/safe-text (get-in session [:output :name]))
-               "\nSetup used the input with monitoring off; the looper engine opens now."
+               "\nSetup is complete; the looper engine opens now. Restored tracks remain stopped."
+               "\nCancel word: scale degrees 7-6-7-6 in any supported octave; C major is B-A-B-A."
                "\nUse low volume/headphones; avoid direct-monitor doubling and feedback.\n")))
 
 
 (defn- live-engine!
-  [terminal deadline session cache]
+  [terminal deadline session cache store]
   (let [session (refresh-session session)
+        initial (merge (runtime/initial-state (:profile session))
+                       (sessions/restore-state (:metadata @store)))
         remaining (max 1.0 (min 600.0 (/ (- deadline (System/nanoTime)) 1e9)))
         running (engine/open! {:live? true :input-device (get-in session [:input :id])
                                :output-device (get-in session [:output :id])
                                :input-channels (min 2 (get-in session [:input :channels]))
                                :duration remaining :capacity control/capacity-samples
                                :prompts (:entries @cache) :monitor? (:monitor? session)
-                               :detect? true})]
+                               :clips (sessions/clips store) :detect? true})
+        running (assoc running :session-store store)]
     (try
-      (loop [state (runtime/initial-state (:profile session)) debug? false
+      (loop [state initial debug? false
              renderer (dashboard/renderer (:ansi? @terminal)) reconfigure? false]
         (let [snapshot (engine/poll! running)
               key (native/read-key! 10)
@@ -234,9 +282,10 @@
                         (>= (System/nanoTime) deadline))
               [state exit-code] (runtime/advance! running cache state snapshot quit?)
               context (merge session (native/terminal-size!)
-                             {:preview? false :debug? debug? :pitch (:pitch snapshot) :scrape (:scrape snapshot)})
+                             {:session-id (get-in @store [:metadata :id])
+                              :preview? false :debug? debug? :pitch (:pitch snapshot)})
               [renderer frame] (dashboard/plan renderer (dashboard/view state context)
-                                                 (quot (System/nanoTime) 1000000))]
+                                               (quot (System/nanoTime) 1000000))]
           (when frame (write! frame))
           (if (some? exit-code)
             {:exit-code exit-code :reconfigure? (or reconfigure? configure?)}
@@ -252,23 +301,35 @@
   (native/arm-wall-clock! 600)
   (let [deadline (+ (System/nanoTime) 599000000000)
         terminal (open! no-tui?)
-        cache (atom nil)]
+        cache (atom nil)
+        store (atom nil)]
     (try
       (when-not (:interactive? @terminal)
         (throw (ex-info "--live requires foreground terminal input and output." {:type :terminal-required})))
-      (loop [session (configure! terminal deadline true cache)]
-        (when session
-          (warn-live! session)
-          (when-not @cache
-            (prepare-cache! cache))
-          (let [{:keys [exit-code reconfigure?]} (live-engine! terminal deadline session @cache)]
-            (when-not (zero? exit-code)
-              (throw (ex-info "Live engine exited with an error." {:exit exit-code})))
-            (when reconfigure?
-              (recur (configure! terminal deadline true cache))))))
+      (when-let [choice (choose-session! terminal deadline)]
+        (reset! store (:store choice))
+        (loop [session (configure! terminal deadline true cache
+                                   (when @store (get-in @@store [:metadata :profile])))]
+          (when session
+            (if @store
+              (let [before (sessions/restore-state (:metadata @@store))
+                    after (assoc before :profile (:profile session))]
+                (sessions/checkpoint! @store nil before after))
+              (reset! store (sessions/create! sessions/default-root (:profile session))))
+            (write! (str "Session: " (dashboard/safe-text (:directory @@store)) "\n"))
+            (warn-live! session)
+            (prepare-cache! cache)
+            (let [{:keys [exit-code reconfigure?]} (live-engine! terminal deadline session @cache @store)]
+              (when-not (zero? exit-code)
+                (throw (ex-info "Live engine exited with an error." {:exit exit-code})))
+              (when reconfigure?
+                (recur (configure! terminal deadline true cache)))))))
       (finally
-        (when @cache (voice/close! @cache))
-        (close! terminal))))
+        (try
+          (when @cache (voice/close! @cache))
+          (finally
+            (try (sessions/close! @store)
+                 (finally (close! terminal))))))))
   nil)
 
 

@@ -1,0 +1,308 @@
+(ns audio-looper.session-checks
+  "Offline persistence checks use only temporary directories and generated PCM."
+  (:require [audio-looper.control :as control]
+            [audio-looper.csound :as native]
+            [audio-looper.engine :as engine]
+            [audio-looper.sessions :as sessions]
+            [audio-looper.voice :as voice]
+            [audio-looper.wav :as wav]
+            [clojure.java.io :as io]
+            [clojure.string :as str]))
+
+
+(defn- verify!
+  [label value]
+  (when-not value (throw (ex-info (str "Session check failed: " label) {:check label}))))
+
+
+(defn- rejected?
+  [f]
+  (try (f) false (catch Exception _ true)))
+
+
+(defn- remove-tree!
+  [file]
+  (when (.isDirectory file) (doseq [child (.listFiles file)] (remove-tree! child)))
+  (.delete file))
+
+
+(defn- generate!
+  [owner name expression duration]
+  (let [path (.getPath (io/file (:directory @owner) name))]
+    (voice/run-child! owner 15000 ["ffmpeg" "-v" "error" "-y" "-f" "lavfi" "-i"
+                                  (str "aevalsrc=" expression ":s=44100:d=" duration)
+                                  "-c:a" "pcm_f32le" path])
+    path))
+
+
+(defn- add-finalized
+  [state event start]
+  (let [{:keys [loop-id operation-id offset-samples length-samples]} event
+        origin (+ start offset-samples)]
+    (-> state
+        (assoc :master (or (:master state) {:origin-sample origin :length-samples length-samples}))
+        (assoc-in [:slots (dec loop-id)]
+                  (merge (control/empty-slot loop-id)
+                         {:clip-state :ready :buffer [loop-id operation-id offset-samples]
+                          :start-sample origin :length-samples length-samples
+                          :record-cycles (when (:master state)
+                                           (quot length-samples (get-in state [:master :length-samples])))})))))
+
+
+(defn- check-session-names!
+  [owner root]
+  (let [store (sessions/create! root control/default-profile)]
+    (try
+      (let [{:keys [metadata directory]} @store
+            id (:id metadata)
+            local-time (str/trim (:out (voice/run-child!
+                                         owner 2000 ["/bin/date" "-r" (str (quot (:created-at metadata) 1000))
+                                                     "+%Y-%m-%d_%H-%M-%S"])))]
+        (verify! "new session names use a readable local timestamp and UUID"
+                 (and (re-matches #"[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}-[a-f0-9-]{36}" id)
+                      (str/starts-with? id (str local-time "-"))
+                      (= id (.getName (io/file directory)))))
+        (let [legacy-id (str (:created-at metadata) "-" (java.util.UUID/randomUUID))
+              legacy-directory (io/file root legacy-id)]
+          (verify! "legacy fixture directory is created" (.mkdir legacy-directory))
+          (spit (io/file legacy-directory "session.edn") (pr-str (assoc metadata :id legacy-id)))
+          (let [loaded (sessions/open! (.getPath legacy-directory))]
+            (try
+              (verify! "Unix-timestamp-named sessions remain loadable"
+                       (= legacy-id (get-in @loaded [:metadata :id])))
+              (finally (sessions/close! loaded))))))
+      (finally (sessions/close! store))))
+  (println "PASS local-time session directory names and legacy timestamp compatibility"))
+
+
+(defn- round-trip!
+  [owner root]
+  (let [input (generate! owner "session-source.wav" "0.24*sin(2*PI*220*t)|0.13*sin(2*PI*371*t)" 0.6)
+        source (wav/read! input)
+        ids [1 3 6]
+        operations (vec (mapcat (fn [index id]
+                                  [{:type :record-start :loop-id id :sample (* index 4096)
+                                    :at-sample (+ (* index 4096) 147)}
+                                   {:type :record-finalize :loop-id id :sample (+ (* index 4096) 3600)
+                                    :length-samples (* (inc index) 512)}]) (range 3) ids))
+        store (sessions/create! root control/default-profile)
+        directory (:directory @store)
+        running (engine/open! {:input input :duration 0.6 :capacity 4096 :detect? false
+                               :operations operations})]
+    (try
+      (verify! "a new session has a durable empty manifest"
+               (empty? (:tracks (sessions/read-manifest! directory))))
+      (verify! "a session cannot be concurrently opened" (rejected? #(sessions/open! directory)))
+      (native/await! (:instance running) 30000)
+      (let [events (filter #(= :record-finalized (:type %)) (:events (engine/poll! running)))
+            ready (reduce (fn [state [index event]]
+                            (let [after (add-finalized state event (+ (* index 4096) 147))]
+                              (sessions/checkpoint! store running state after)
+                              after))
+                          (control/initial-state) (map-indexed vector events))
+            metadata (sessions/read-manifest! directory)
+            restored (sessions/restore-state metadata)]
+        (verify! "sparse six-slot identities are preserved" (= ids (mapv :id (:tracks metadata))))
+        (verify! "only acknowledged clips are durable" (= 3 (count (:tracks metadata))))
+        (verify! "restored sessions are idle and stopped with no old operations"
+                 (and (nil? (:active-recorder restored)) (= 0 (:effect-seq restored))
+                      (= 0 (:event-seq restored)) (= :dormant (get-in restored [:parser :phase]))
+                      (every? #(and (= :idle (:record-state %)) (= :stopped (:play-state %))
+                                     (nil? (:pending %))) (:slots restored))))
+        (verify! "master phase is rebased, lengths and cycles retained"
+                 (and (= {:origin-sample 0 :length-samples 512} (:master restored))
+                      (= [1 2 3] (mapv #(get-in restored [:slots (dec %) :record-cycles]) ids))))
+        (let [loaded (engine/open! {:input input :duration 0.05 :capacity 4096 :detect? false
+                                    :clips (sessions/clips store)
+                                    :operations [{:type :playback-start :loop-id 3 :sample 0 :at-sample 64}]})]
+          (try
+            (native/await! (:instance loaded) 30000)
+            (let [events (:events (engine/poll! loaded))]
+              (verify! "native restored track can play using the existing transport"
+                       (some #(and (= :playback-started (:type %)) (= 3 (:loop-id %))) events)))
+            (engine/enqueue! loaded {:type :playback-start :id 99 :loop-id 1 :at-sample 3000})
+            (verify! "loaded raw WAVs receive playback-only makeup without a schema change"
+                     (< 1 (get-in @(:transport loaded) [:playback-gains 1]) 16))
+            (verify! "gain measurement rejects ranges outside the native table"
+                     (rejected? #(native/playback-gain! (:instance loaded) 1 4000 512)))
+            (doseq [[index id] (map-indexed vector ids)
+                    channel (range 2)]
+              (let [length (* (inc index) 512)
+                    table (+ 100 (* 2 (dec id)) channel)
+                    samples (native/table-range! (:instance loaded) table 0 length)]
+                (verify! "float64 WAV round-trip retains EVERY original stereo sample"
+                         (every? true? (map-indexed
+                                         (fn [frame sample]
+                                           (== sample (wav/sample source (+ (* index 4096) 147 frame) channel)))
+                                         samples)))))
+            (finally (engine/close! loaded))))
+        (let [track (first (sessions/clips store))
+              wave (wav/read! (:file track))
+              invalid (.getPath (io/file (:directory @owner) "nonfinite.wav"))
+              bytes (:bytes wave)
+              created (atom nil)]
+          (verify! "persisted files are exact stereo float64 WAV"
+                   (and (= 64 (:bits wave)) (= 3 (:format wave)) (= 2 (:channels wave))))
+          (verify! "WAV length mismatches fail closed"
+                   (rejected? #(native/validate-track! (:file track) (inc (:length-samples track)))))
+          (let [link (.getPath (io/file (:directory @owner) "linked-track.wav"))
+                fifo (.getPath (io/file (:directory @owner) "fifo-track.wav"))]
+            (voice/run-child! owner 2000 ["/bin/ln" "-s" (:file track) link])
+            (voice/run-child! owner 2000 ["/usr/bin/mkfifo" fifo])
+            (verify! "symlinked WAVs are rejected by the native reader"
+                     (rejected? #(native/validate-track! link 512)))
+            (verify! "nonregular WAV paths fail without blocking"
+                     (rejected? #(native/validate-track! fifo 512))))
+          (doseq [[index value] (map-indexed vector [0 0 0 0 0 0 -8 127])]
+            (aset bytes (+ (:offset wave) index) (byte value)))
+          (with-open [output (io/output-stream invalid)] (.write output bytes))
+          (verify! "non-finite samples fail closed" (rejected? #(native/validate-track! invalid 512)))
+          (verify! "failed restore destroys its owned native instance"
+                   (and (rejected? #(engine/open! {:input input :duration 0.01 :capacity 4096
+                                                   :detect? false :clips [(assoc track :file invalid)]
+                                                   :on-instance (fn [instance] (reset! created instance))}))
+                        (native/closed? @created))))
+        (let [without-master-slot (assoc-in ready [:slots 0] (control/empty-slot 1))]
+          (sessions/checkpoint! store running ready without-master-slot)
+          (verify! "erase persists only after acceptance, original master period survives"
+                   (let [metadata (sessions/read-manifest! directory)]
+                     (and (= [3 6] (mapv :id (:tracks metadata)))
+                          (= 512 (get-in metadata [:master :length-samples])))))
+          (let [manifest (slurp (io/file directory "session.edn"))
+                old-commit native/commit-file!]
+            (with-redefs [native/commit-file! (fn [temporary destination parent]
+                                               (if (.endsWith destination "session.edn")
+                                                 (throw (ex-info "Injected disk failure" {}))
+                                                 (old-commit temporary destination parent)))]
+              (verify! "failed metadata commit is reported"
+                       (rejected? #(sessions/checkpoint! store running without-master-slot
+                                                         (control/initial-state)))))
+            (verify! "failed commit preserves previous manifest and referenced PCM"
+                     (and (= manifest (slurp (io/file directory "session.edn")))
+                          (every? #(.exists (io/file (:file %))) (sessions/clips store))))))
+        (sessions/close! store)
+        (let [reopened (sessions/open! directory)]
+          (try
+            (verify! "closing releases the session lock for reload" (= 2 (count (sessions/clips reopened))))
+            (let [before (sessions/restore-state (:metadata @reopened))]
+              (sessions/checkpoint! reopened nil before (control/initial-state))
+              (verify! "erasing the final tracks durably resets master and removes old PCM"
+                       (let [metadata (sessions/read-manifest! directory)]
+                         (and (nil? (:master metadata)) (empty? (:tracks metadata))
+                              (not-any? #(.endsWith (.getName %) ".wav") (.listFiles (io/file directory)))))))
+            (finally (sessions/close! reopened)))))
+      (finally (engine/close! running) (sessions/close! store)))
+    (println "PASS durable stereo PCM, sparse slots, reload/playback, master phase, erase and atomic failure")))
+
+
+(defn- check-performing-export!
+  [owner root]
+  (let [input (generate! owner "performing-source.wav" "0.24*sin(2*PI*220*t)|0.13*sin(2*PI*371*t)" 0.3)
+        store (sessions/create! root control/default-profile)
+        running (engine/open! {:input input :duration 600 :capacity 4096 :detect? false
+                               :operations [{:type :record-start :sample 0 :at-sample 147}
+                                            {:type :record-finalize :sample 3500 :length-samples 2048}
+                                            {:type :playback-start :sample 4000 :at-sample 4507}]})]
+    (try
+      (let [events (loop [events [] attempts 500]
+                     (verify! "offline performing fixture reaches playback" (pos? attempts))
+                     (let [snapshot (engine/poll! running)
+                           events (into events (:events snapshot))]
+                       (if (some #(= :playback-started (:type %)) events) events
+                         (do (Thread/sleep 2) (recur events (dec attempts))))))
+            finalized (first (filter #(= :record-finalized (:type %)) events))
+            state (assoc-in (add-finalized (control/initial-state) finalized 147)
+                            [:slots 0 :play-state] :playing)
+            before (native/control (:instance running) "engine/clock")]
+        (verify! "export fixture still has a running native performance" (not (native/finished? (:instance running))))
+        (sessions/checkpoint! store running (control/initial-state) state)
+        (verify! "audio sample clock advances independently during host file export"
+                 (> (native/control (:instance running) "engine/clock") before))
+        (native/validate-track! (:file (first (sessions/clips store))) 2048)
+        (verify! "native write errors propagate without publishing a new file"
+                 (rejected? #(native/save-track! (:instance running) 1
+                                                 (.getPath (io/file (:directory @owner) "missing" "track.wav"))
+                                                 0 2048)))
+        (native/check-health! (:instance running)))
+      (finally (engine/close! running) (sessions/close! store))))
+  (println "PASS immutable PCM export during active offline playback; host I/O never stalls the audio worker"))
+
+
+(defn- check-trim!
+  [owner root]
+  (let [input (generate! owner "session-trim.wav"
+                         "if(between(t\\,0.05\\,0.11)\\,0.4*sin(2*PI*220*t)\\,0)|if(between(t\\,0.05\\,0.11)\\,0.2*sin(2*PI*330*t)\\,0)" 0.3)
+        source (wav/read! input)
+        store (sessions/create! root control/default-profile)
+        running (engine/open! {:input input :duration 0.3 :capacity 10000 :detect? false
+                               :operations [{:type :record-start :sample 0 :at-sample 147}
+                                            {:type :record-finalize :sample 8200 :length-samples 8000 :arg 1}]})]
+    (try
+      (native/await! (:instance running) 30000)
+      (let [event (first (filter #(= :record-finalized (:type %)) (:events (engine/poll! running))))
+            state (add-finalized (control/initial-state) event 147)]
+        (verify! "fixture has a real trimmed offset" (pos? (:offset-samples event)))
+        (sessions/checkpoint! store running (control/initial-state) state)
+        (let [loaded (engine/open! {:input input :duration 0.01 :capacity 10000 :detect? false
+                                    :clips (sessions/clips store)})]
+          (try
+            (native/await! (:instance loaded) 30000)
+            (doseq [channel (range 2)]
+              (verify! "trimmed clip exports only the retained range with phase unchanged"
+                       (every? true? (map-indexed
+                                       (fn [frame sample]
+                                         (== sample (wav/sample source (+ 147 (:offset-samples event) frame) channel)))
+                                       (native/table-range! (:instance loaded) (+ 100 channel) 0
+                                                            (:length-samples event))))))
+            (finally (engine/close! loaded)))))
+      (finally (engine/close! running) (sessions/close! store))))
+  (println "PASS persisted master trim offsets preserve every retained stereo sample"))
+
+
+(defn- check-validation!
+  [root]
+  (let [store (sessions/create! root control/default-profile)
+        directory (:directory @store)
+        metadata (:metadata @store)]
+    (try
+      (doseq [bad [(assoc metadata :version 99)
+                   (assoc metadata :profile {})
+                   (assoc metadata :master {:length-samples 512}
+                                   :tracks [{:id 1 :file "../../outside.wav" :length-samples 512}])
+                   (assoc metadata :master {:length-samples 0})]]
+        (verify! "malformed metadata fails closed" (rejected? #(sessions/validate bad))))
+      (spit (io/file directory "session.edn") (apply str (repeat 65537 " ")))
+      (verify! "oversized metadata is rejected before parsing" (rejected? #(sessions/read-manifest! directory)))
+      (spit (io/file directory "session.edn") (str (pr-str metadata) "\n{:extra true}"))
+      (verify! "trailing manifest data is rejected" (rejected? #(sessions/read-manifest! directory)))
+      (spit (io/file directory "session.edn") "#=(System/exit 0)")
+      (verify! "manifest parsing never evaluates reader forms" (rejected? #(sessions/read-manifest! directory)))
+      (spit (io/file directory "session.edn") (pr-str metadata))
+      (verify! "missing or invalid WAV is rejected" (rejected? #(native/validate-track! "/dev/null" 1)))
+      (let [filename (str "track-1-" (java.util.UUID/randomUUID) ".wav")
+            manifest (assoc metadata :master {:length-samples 512}
+                                    :tracks [{:id 1 :file filename :length-samples 512}])]
+        (spit (io/file directory "session.edn") (pr-str manifest))
+        (sessions/close! store)
+        (verify! "missing referenced track refuses reload" (rejected? #(sessions/open! directory)))
+        (spit (io/file directory filename) "truncated WAV")
+        (verify! "corrupt referenced track refuses reload" (rejected? #(sessions/open! directory))))
+      (finally (sessions/close! store))))
+  (verify! "session listing includes readable valid sessions"
+           (some #(and (:metadata %) (not (:error %))) (sessions/list! root)))
+  (println "PASS session lock, bounded metadata, untrusted EDN and missing/corrupt files"))
+
+
+(defn check-sessions!
+  []
+  (let [owner (voice/prepare! #{} nil)
+        root (.getPath (io/file (:directory @owner) "sessions"))]
+    (try
+      (check-session-names! owner root)
+      (round-trip! owner root)
+      (check-performing-export! owner root)
+      (check-trim! owner root)
+      (check-validation! root)
+      (finally
+        (remove-tree! (io/file root))
+        (voice/close! owner)))))

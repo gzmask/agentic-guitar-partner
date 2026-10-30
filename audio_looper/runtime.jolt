@@ -2,6 +2,7 @@
   "Host-owned reducer/effect boundary, pumped at 100Hz outside native audio work."
   (:require [audio-looper.control :as control]
             [audio-looper.engine :as engine]
+            [audio-looper.sessions :as sessions]
             [audio-looper.voice :as voice]))
 
 
@@ -30,7 +31,9 @@
 (defn apply-events!
   [running cache state events]
   (reduce (fn [[state exit-code] event]
-            (let [[state effects] (control/step state event)
+            (let [before state
+                  [state effects] (control/step state event)
+                  _ (sessions/checkpoint! (:session-store running) running before state)
                   exit (dispatch! running cache effects)]
               [state (if (some? exit) exit exit-code)]))
           [state nil] events))

@@ -6,8 +6,8 @@
 ;; Jolt 0.8.10 load-file leaves the last loaded namespace current.
 (let [entry-namespace (ns-name *ns*)]
   (doseq [source ["notes.jolt" "control.jolt" "control_checks.jolt" "csound.jolt"
-                  "wav.jolt" "scrape.jolt" "dsp.jolt" "engine.jolt" "voice.jolt" "runtime.jolt"
-                  "runtime_checks.jolt" "setup.jolt" "dashboard.jolt" "ui_checks.jolt" "engine_checks.jolt"
+                  "wav.jolt" "dsp.jolt" "engine.jolt" "voice.jolt" "sessions.jolt" "runtime.jolt"
+                  "runtime_checks.jolt" "session_checks.jolt" "setup.jolt" "dashboard.jolt" "ui_checks.jolt" "engine_checks.jolt"
                   "terminal.jolt"]]
     (load-file (.getPath (io/file (or (.getParent (io/file *file*)) ".")
                                   "audio_looper" source))))
@@ -19,6 +19,7 @@
 (require '[audio-looper.ui-checks :as ui-checks])
 (require '[audio-looper.engine-checks :as engine-checks])
 (require '[audio-looper.runtime-checks :as runtime-checks])
+(require '[audio-looper.session-checks :as session-checks])
 (require '[audio-looper.terminal :as terminal])
 
 
@@ -267,6 +268,7 @@ endin")
   (checks/check-control!)
   (ui-checks/check-ui!)
   (runtime-checks/check-runtime!)
+  (session-checks/check-sessions!)
   (engine-checks/check-engine!)
   (prn (engine/versions))
   (check-control!)
@@ -285,11 +287,12 @@ endin")
       ["--check-control"] (checks/check-control!)
       ["--check-ui"] (ui-checks/check-ui!)
       ["--check-runtime"] (runtime-checks/check-runtime!)
+      ["--check-sessions"] (do (engine/arm-wall-clock! 600) (session-checks/check-sessions!))
       ["--check-engine"] (do (engine/arm-wall-clock! 600) (engine-checks/check-engine!))
       ["--devices"] (do (engine/arm-wall-clock! 600) (terminal/list-devices!))
       ["--live"] (terminal/live! no-tui?)
       ([] ["--preview"]) (terminal/preview! no-tui?)
-      ["--help"] (println "Default/--preview: keyboard input selection and OFFLINE dashboard; NO audio stream.\n--live: foreground live PCM looper; after input select Enter/1 for default C major, 2 for custom scale/wake, 3 for custom wake on C major; guitar C/D/E selects 1/2/3 after release and 1s silence.\n--no-tui: plain output; redirected preview prints once.\n--devices: current CoreAudio names, stable UIDs and volatile identifiers.\n--check-control / --check-ui / --check-runtime / --check-engine: offline checks.\n--check: all offline checks including embedded API/PCM/TTS. Only --live opens audio devices.")
+      ["--help"] (println "Default/--preview: keyboard input selection and OFFLINE dashboard; NO audio stream.\n--live: foreground PCM looper; choose new/load session, then current input. New sessions offer Enter/1 for default C major, 2 for custom scale/wake, 3 for custom C-major wake; loaded sessions restore their profile.\n--no-tui: plain output; redirected preview prints once.\n--devices: current CoreAudio names, stable UIDs and volatile identifiers.\n--check-control / --check-ui / --check-runtime / --check-sessions / --check-engine: offline checks.\n--check: all offline checks including embedded API/PCM/TTS. Only --live opens audio devices.")
       (throw (ex-info "Unknown options; use --help."
                       {:type :usage}))))
   (catch Exception e

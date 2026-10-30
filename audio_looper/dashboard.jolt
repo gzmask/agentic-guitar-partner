@@ -41,12 +41,9 @@
                 (:cycle slot))
         pending (:pending slot)]
     {:id (:id slot) :state label :length (:length-samples slot) :duration duration :cycle cycle
-     :cycles (:record-cycles slot) :target-length-samples (:target-length-samples slot)
-     :pending pending
+     :cycles (:record-cycles slot) :pending pending
      :text (str (:id slot) "  " (str/upper-case (name label))
                 (when (pos? duration) (str "  " (seconds duration)))
-                (when (pos? (or (:target-length-samples slot) 0))
-                  (str "  target=" (:record-cycles slot) "T"))
                 (when (and (= :ready (:clip-state slot)) (:record-cycles slot))
                   (str "  length=" (:record-cycles slot) "T"))
                 (when (= :playing play) (str "  cycle=" cycle))
@@ -66,22 +63,25 @@
         phase (get-in state [:parser :phase])
         voice (:voice state)
         estimate (:pitch context)
-        scrape (:scrape context)
+        candidate (:cancel-phrase state)
         latest (:latest-note state)
         midi (or (:midi estimate) (get-in state [:held :midi]))
-        deadline (get-in state [:parser :deadline])
+        deadline (or (:deadline candidate) (get-in state [:parser :deadline]))
         degrees (str/join "  " (map-indexed #(str (inc %1) "=" (note-name %2)) (:selectors configuration)))
         wake (str (str/join "-" (get-in configuration [:wake :degrees])) " ["
-                  (str/join " " (map note-name (get-in configuration [:wake :midi]))) "]")]
-    {:preview? (:preview? context) :debug? (:debug? context)
+                  (str/join " " (map note-name (get-in configuration [:wake :midi]))) "]")
+        cancel-word (str (str/join "-" control/cancel-degrees) " ["
+                         (str/join " " (map note-name (control/cancel-pattern configuration))) "]")]
+    {:preview? (:preview? context) :debug? (:debug? context) :session-id (:session-id context)
      :columns (max 20 (min 200 (or (:columns context) 100)))
      :rows (max 12 (min 80 (or (:rows context) 40)))
      :input (str (:name (:input context)) " [" (:id (:input context)) "]")
      :output (str (:name (:output context)) " [" (:id (:output context)) "]")
      :phase (str/upper-case (name phase))
      :voice (if voice (str (name (:state voice)) ": " (name (:prompt voice))) "idle")
-     :paused? (or voice (not (#{:dormant :wait-loop :wait-operation :wait-record-length} phase)))
+     :paused? (or voice (not (#{:dormant :wait-loop :wait-operation} phase)))
      :scale (or (:name configuration) "custom seven-degree scale") :degrees degrees :wake wake
+     :cancel-word cancel-word :cancel-progress (str (count (:tokens candidate)) "/4")
      :timeout (when deadline (format "%.1fs" (/ (double (max 0 (- deadline (:sample state)))) 44100.0)))
      :slots (mapv #(slot-view state %) (:slots state))
      :gate (if estimate (str (if (:gate? estimate) "OPEN" "CLOSED") "  level=" (:db estimate) " dBFS")
@@ -91,21 +91,21 @@
                                                  (double (or (:hz estimate) 0))))) "--")
      :event (if latest (str (name (:type latest)) " id=" (:id latest)) "none")
      :history (str/join " " (map note-name (:note-history state)))
-     :scrape (when scrape (format "Scrape match=%.2f level=%.1f noise=%.1f dBFS"
-                                  (double (:score scrape)) (double (:db scrape)) (double (:noise scrape))))
      :parsed (str "wake-prefix=" (count (get-in state [:parser :tokens]))
+                  " cancel-prefix=" (count (:tokens candidate)) "/4"
                   (when-let [id (get-in state [:parser :loop-id])] (str " -> LOOP " id))
                   " -> " (name phase))
      :options (control/navigation state)
-     :instruction (case phase :dormant (if (= :recording (get-in state [:slots (dec (or (:active-recorder state) 1)) :record-state]))
-                                       "Scrape low E to stop recording; wake then scrape exits."
-                                       (str "Wake by degree in any octave: " wake))
-                        :wait-loop "Scrape low E to exit, or select a looper."
-                        :wait-operation "Scrape stops playback; empty slot begins recording setup after the action window."
-                        :wait-record-length "Choose 1–6 master cycles, or scrape to cancel."
-                        :arm-release "Release the command note to begin recording; scrape to cancel."
-                        :await-engine "Waiting for engine acknowledgement."
-                        "Notes paused during prompt/guard; contextual scrape remains available.")
+     :instruction (if candidate
+                    (str "Cancel word: " (count (:tokens candidate)) "/4; finish 7-6-7-6.")
+                    (case phase :dormant (if (= :recording (get-in state [:slots (dec (or (:active-recorder state) 1)) :record-state]))
+                                           "Cancel 7-6-7-6 to finish recording; wake then cancel exits."
+                                           (str "Wake by degree in any octave: " wake))
+                          :wait-loop "Cancel 7-6-7-6 exits, or select a looper."
+                          :wait-operation "Cancel word stops playback; empty slot auto-records after the window."
+                          :arm-release "Release the command note to record; cancel word cancels the arm."
+                          :await-engine "Waiting for engine acknowledgement."
+                          "Menu notes paused during prompt/guard; cancel word remains available."))
      :configure? (setup/reconfigurable? state)
      :events (mapv #(str (seconds (:sample %)) "  " (name (:type %))
                          (when (:loop-id %) (str " loop=" (:loop-id %)))) (take-last 5 (:log state)))}))
@@ -131,12 +131,14 @@
 
 (defn render
   [snapshot]
-  (let [headers [(str "GUITAR AUDIO LOOPER" (when (:preview? snapshot) " - OFFLINE PREVIEW (NO AUDIO)"))
+  (let [headers [(str "GUITAR AUDIO LOOPER" (when (:preview? snapshot) " - OFFLINE PREVIEW (NO AUDIO)")
+                      (when (:session-id snapshot) (str " | " (:session-id snapshot))))
                  (str "Input: " (:input snapshot)) (str "Output: " (:output snapshot))
                  (str "Control: " (:phase snapshot) "  Voice: " (:voice snapshot)
-                      (when (:paused? snapshot) " [NOTES PAUSED]"))]
+                      (when (:paused? snapshot) " [MENU NOTES PAUSED]"))]
         scale (str "Scale: " (:scale snapshot))
         wake (str "Wake (any octave): " (:wake snapshot))
+        cancel-word (str "Cancel (any octave): " (:cancel-word snapshot) "  " (:cancel-progress snapshot))
         timeout (str "Timeout: " (or (:timeout snapshot) "--"))
         pitch-title (str "PITCH DEBUG [RAW " (if (:debug? snapshot) "ON" "OFF") "]")
         options (if (seq (:options snapshot))
@@ -144,21 +146,18 @@
                   [(:instruction snapshot)])
         keyboard (str "Keyboard: [d] debug  [c] configure" (when-not (:configure? snapshot) " (disabled)") "  [q] safe quit")
         lines (if (< (:rows snapshot) 36)
-                (concat headers [(str scale " | " (:degrees snapshot)) (str wake " | " timeout) "LOOPERS"]
+                (concat headers [(str scale " | " (:degrees snapshot)) (str wake " | " timeout) cancel-word "LOOPERS"]
                         (map #(str/join " | " (map :text %)) (partition-all 2 (:slots snapshot)))
-                        [(str pitch-title " " (:pitch snapshot) " | " (:gate snapshot))
-                         (str "Event: " (:event snapshot) " | History: " (:history snapshot))
-                         (str "Parsed: " (:parsed snapshot)
-                              (when (and (:debug? snapshot) (:scrape snapshot)) (str " | " (:scrape snapshot))))
-                         "AVAILABLE GUITAR INPUT (reference octave; any octave accepted)"]
+                        [(str pitch-title " " (:pitch snapshot) " | " (:gate snapshot))]
+                        [(str "Event: " (:event snapshot) " | History: " (:history snapshot))]
+                        ["AVAILABLE GUITAR INPUT (reference octave; any octave accepted)"]
                         options [keyboard (str "EVENTS " (last (:events snapshot)))])
-                (concat headers [scale (:degrees snapshot) wake timeout "LOOPERS"]
+                (concat headers [scale (:degrees snapshot) wake cancel-word timeout "LOOPERS"]
                         (map :text (:slots snapshot))
                         [pitch-title (str "Gate: " (:gate snapshot)) (str "Current: " (:pitch snapshot))
                          (str "Event: " (:event snapshot)) (str "History: " (:history snapshot))
-                         (str "Parsed: " (:parsed snapshot)
-                              (when (and (:debug? snapshot) (:scrape snapshot)) (str " | " (:scrape snapshot))))
-                         "AVAILABLE GUITAR INPUT (reference octave; any octave accepted)"]
+                         (str "Parsed: " (:parsed snapshot))]
+                        ["AVAILABLE GUITAR INPUT (reference octave; any octave accepted)"]
                         options [keyboard "EVENTS"] (:events snapshot)))]
     (str (str/join "\n" (map #(fit-line % (:columns snapshot)) (take (dec (:rows snapshot)) lines))) "\n")))
 
@@ -170,10 +169,10 @@
 
 (defn- line-key
   [snapshot]
-  (cond-> (select-keys snapshot [:input :output :phase :voice :scale :degrees :wake :options :debug?])
-    true (assoc :slots (mapv #(select-keys % [:id :state :length :cycles :target-length-samples :pending])
+  (cond-> (select-keys snapshot [:session-id :input :output :phase :voice :scale :degrees :wake :cancel-word :cancel-progress :options :debug?])
+    true (assoc :slots (mapv #(select-keys % [:id :state :length :cycles :pending])
                              (:slots snapshot)))
-    (:debug? snapshot) (assoc :pitch (:pitch snapshot) :gate (:gate snapshot) :scrape (:scrape snapshot)
+    (:debug? snapshot) (assoc :pitch (:pitch snapshot) :gate (:gate snapshot)
                               :event (:event snapshot) :events (:events snapshot))))
 
 
@@ -192,4 +191,4 @@
                     " loops=" (str/join "," (map #(str (:id %) ":" (name (:state %))) (:slots snapshot)))
                     (when (:debug? snapshot)
                       (str " PITCH " (safe-text (:pitch snapshot))
-                           (when (:scrape snapshot) (str " " (safe-text (:scrape snapshot)))))) "\n"))])))
+                           " CANCEL " (safe-text (:cancel-progress snapshot)))) "\n"))])))

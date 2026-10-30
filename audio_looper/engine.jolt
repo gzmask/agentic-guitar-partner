@@ -12,14 +12,22 @@
       (when-let [created (:on-instance configuration)] (created instance))
       (native/compile! instance (dsp/document configuration))
       (native/prepare! instance)
+      (native/bind-track-tables! instance (:capacity configuration 5292000))
+      (doseq [{:keys [id file length-samples]} (:clips configuration)]
+        (native/load-track! instance id file length-samples))
       (doseq [{:keys [table file frames]} (:prompts configuration)]
         (let [wave (wav/read! file)]
           (when-not (and (= 1 (:channels wave)) (= 44100 (:rate wave)) (= frames (:frames wave)))
             (throw (ex-info "Prompt changed after validation." {:type :engine-error :stage :assets})))
           (native/load-mono-table! instance table file frames)))
-      (native/start! instance)
-      {:instance instance :configuration configuration
-       :transport (atom {:event-seq 0 :next-seq 1 :in-flight nil :queue [] :held nil :last-note-id 0})}
+      (let [clips (into {} (for [{:keys [id length-samples]} (:clips configuration)]
+                             [id {:offset-samples 0 :length-samples length-samples}]))
+            gains (into {} (for [[id clip] clips]
+                             [id (native/playback-gain! instance id 0 (:length-samples clip))]))]
+        (native/start! instance)
+        {:instance instance :configuration configuration
+         :transport (atom {:event-seq 0 :next-seq 1 :in-flight nil :queue [] :held nil :last-note-id 0
+                           :clips clips :playback-gains gains})})
       (catch Exception e (native/close! instance) (throw e)))))
 
 
@@ -32,11 +40,24 @@
   [engine operation]
   (when-not (get dsp/operation-codes (:type operation))
     (throw (ex-info "Unsupported engine operation." {:operation operation})))
-  (swap! (:transport engine)
-         (fn [state]
-           (when (>= (count (:queue state)) 64)
-             (throw (ex-info "Host operation queue overflow." {:type :engine-error :stage :queue})))
-           (update state :queue conj operation)))
+  (let [state @(:transport engine)
+        loop-id (:loop-id operation)
+        clip (get-in state [:clips loop-id])
+        gain (when (= :playback-start (:type operation))
+               (if clip
+                 (or (get-in state [:playback-gains loop-id])
+                     (throw (ex-info "Ready clip has no measured playback gain."
+                                     {:type :engine-error :stage :playback-gain})))
+                 1.0))
+        _ (when (and gain (not (<= 1.0 gain 16.0)))
+            (throw (ex-info "Invalid playback makeup gain." {:type :engine-error :stage :playback-gain})))
+        operation (cond-> operation gain (assoc :arg gain))]
+    (swap! (:transport engine)
+           (fn [state]
+             (when (>= (count (:queue state)) 64)
+               (throw (ex-info "Host operation queue overflow." {:type :engine-error :stage :queue})))
+             (cond-> (update state :queue conj operation)
+               gain (assoc-in [:playback-gains loop-id] gain)))))
   nil)
 
 
@@ -76,11 +97,10 @@
     (when-not type (throw (ex-info "Unknown native event type." {:type :engine-error :stage :protocol})))
     (case type
       :note-on (merge base {:id id :midi (long a) :onset-sample (long b) :cents c :hz d :db e
-                           :onset-time (/ b 44100.0) :confirm-time (/ sample 44100.0)})
+                            :onset-time (/ b 44100.0) :confirm-time (/ sample 44100.0)})
       :note-off (merge base {:id id :end-sample (long a) :reason (if (== b 1) :silence :pitch-change)})
       :prompt-finished (assoc base :id id)
       :record-limit (assoc base :loop-id slot :operation-id id :length-samples (long a))
-      :scrape (assoc base :loop-id slot :operation-id id :onset-sample (long a) :score b)
       :playback-cancelled (assoc base :loop-id slot :operation-id id
                                  :cancelled? (cond (== a 1) true (== a 0) false :else nil))
       :mixer-faded (assoc base :operation-id id)
@@ -123,15 +143,28 @@
                              :note-on (assoc state :held event :latest-note event :last-note-id (:id event))
                              :note-off (cond-> (assoc state :latest-note event)
                                          (= (:id event) (get-in state [:held :id])) (assoc :held nil))
+                             :record-finalized (-> state
+                                                   (assoc-in [:clips (:loop-id event)]
+                                                             (select-keys event [:offset-samples :length-samples]))
+                                                   (update :playback-gains dissoc (:loop-id event)))
+                             (:record-started :record-cancelled :buffer-erased)
+                             (-> state (update :clips dissoc (:loop-id event))
+                                 (update :playback-gains dissoc (:loop-id event)))
                              state))
                          (assoc state :event-seq written) events)))
+        ;; Measure while publishing a new ready clip, never on the timed play
+        ;; request. A full-capacity scan must not consume its scheduling lead.
+        ;; Later erase/start events in the same drain invalidate stale ranges.
+        (doseq [loop-id (distinct (keep #(when (= :record-finalized (:type %)) (:loop-id %)) events))
+                :let [clip (get-in @(:transport engine) [:clips loop-id])]
+                :when (and clip (== (:length-samples clip)
+                                    (native/control instance (str "slot/" (dec loop-id) "/length"))))]
+          (let [gain (native/playback-gain! instance loop-id (:offset-samples clip) (:length-samples clip))]
+            (swap! (:transport engine) assoc-in [:playback-gains loop-id] gain)))
         (native/set-control! instance "e/ack" written)
         (send-next! engine)
         {:events events :sample (max clock (or (:sample (last events)) 0))
          :ended? (native/finished? instance)
          :pitch {:hz hz :db (native/control instance "pitch/db")
                  :midi (when (<= 70 hz 1400) (long (native/control instance "pitch/midi")))
-                 :cents (native/control instance "pitch/cents") :gate? (pos? (native/control instance "pitch/gate"))}
-         :scrape {:score (native/control instance "scrape/score")
-                  :db (native/control instance "scrape/db")
-                  :noise (native/control instance "scrape/noise")}}))))
+                 :cents (native/control instance "pitch/cents") :gate? (pos? (native/control instance "pitch/gate"))}}))))

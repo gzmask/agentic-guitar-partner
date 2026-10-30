@@ -144,6 +144,23 @@
              (some #(str/starts-with? % "LIVE CAPTURE:") (setup/prompt scale true)))))
 
 
+(defn- check-restored-setup!
+  []
+  (let [profile (control/profile [62 64 65 67 69 70 72 74] [74 77 74])
+        initial (assoc (setup/initial-state inventory) :saved-profile profile)
+        fx (setup/step initial {:type :line :text "1"})
+        mic (setup/step initial {:type :line :text "2"})
+        ready (setup/step mic {:type :line :text "y"})]
+    (verify! "restored profile skips live recapture but still selects a current input"
+             (and (= :ready (:stage fx)) (= profile (:profile fx))
+                  (= "fx" (get-in fx [:input :uid]))))
+    (verify! "loading a session cannot bypass microphone/headphone safety"
+             (and (= :headphones (:stage mic)) (= :ready (:stage ready))
+                  (:headphones? ready) (false? (:monitor? ready))))
+    (verify! "resolved restored profile is retained"
+             (= profile (:profile (setup/resolve-session ready inventory))))))
+
+
 (defn- check-dashboard!
   []
   (let [state (-> (control/initial-state)
@@ -167,14 +184,29 @@
                         (assoc :active-recorder 1)
                         (assoc-in [:slots 0 :record-state] :recording)
                         (assoc-in [:slots 0 :start-sample] 0))
-          view (dashboard/view recording (assoc context :debug? true
-                                                 :scrape {:score 0.94 :db -55.0 :noise -90.0}))
+          view (dashboard/view recording (assoc context :debug? true :columns 80 :rows 24
+                                                :pitch {:midi 71 :hz 493.883 :cents 0 :db -26 :gate? true}))
           output (dashboard/render view)]
-      (verify! "recording shows direct scrape stop" (str/includes? output "Scrape low E to stop"))
-      (verify! "debug shows scrape score" (str/includes? output "Scrape match=0.94"))
+      (verify! "recording shows the direct note-based cancel word"
+               (str/includes? output "Cancel 7-6-7-6 to finish recording"))
+      (doseq [text ["Cancel (any octave)" "7-6-7-6 [B4 A4 B4 A4]" "0/4" "B4 MIDI=71" "Keyboard" "EVENTS"]]
+        (verify! (str "compact debug keeps visible note/cancel information: " text)
+                 (str/includes? output text)))
+      (verify! "retired acoustic detector diagnostics never appear" (not (str/includes? output "Scrape")))
+      (let [pending (dashboard/view (assoc recording :cancel-phrase
+                                           {:tokens [{:midi 71} {:midi 69}] :deadline 44100})
+                                    (assoc context :columns 80 :rows 24))
+            compact (dashboard/render pending)]
+        (verify! "cancel progress and word deadline are visible"
+                 (and (str/includes? compact "2/4") (= "1.0s" (:timeout pending)))))
+      (let [waiting (assoc-in (control/initial-state) [:parser :phase] :wait-loop)
+            compact (dashboard/render (assoc view :phase "WAIT_LOOP" :options (control/navigation waiting)))]
+        (doseq [text ["C4  select loop" "A4  select loop" "Cancel (any octave)" "Keyboard" "EVENTS"]]
+          (verify! (str "six-selector compact debug keeps word/menu/footer: " text)
+                   (str/includes? compact text))))
       (let [[renderer _] (dashboard/plan (dashboard/renderer false) view 0)
-            [_ line] (dashboard/plan renderer (assoc view :scrape "Scrape match=0.95") 100)]
-        (verify! "plain debug output shows updated scrape score" (str/includes? line "Scrape match=0.95"))))
+            [_ line] (dashboard/plan renderer (assoc view :cancel-progress "3/4") 100)]
+        (verify! "plain debug output shows cancel-word progress" (str/includes? line "CANCEL 3/4"))))
     (let [queued (-> state
                      (assoc :parser {:phase :dormant :tokens []} :sample 10)
                      (assoc-in [:slots 0 :play-state] :queued-start)
@@ -210,6 +242,7 @@
 (defn check-ui!
   []
   (check-setup!)
-  (println "PASS setup/device identity/custom capture/headphone policy")
+  (check-restored-setup!)
+  (println "PASS setup/device identity/custom capture/restored profile/headphone policy")
   (check-dashboard!)
   (println "PASS dashboard/policy menu/10fps/plain logs/terminal sanitization"))

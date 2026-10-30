@@ -34,14 +34,25 @@ or a generic benchmark framework unless explicitly requested. There are no
   fail-closed gaps, and publication only after native acknowledgement.
 - Keep foreground ownership, Ctrl+C cleanup, terminal restoration, and the
   independent 600-second OS wall-clock alarm.
+- Persist only acknowledged finalized PCM in git-ignored session folders.
+  Commit WAVs before the versioned manifest, preserve float64 stereo samples and
+  trim offsets, and never save incomplete/cancelled takes as valid tracks.
+- Restore loaded tracks stopped, with fresh operation IDs and a rebased master
+  clock; retain profile/slot identities and reselect current audio devices.
+  Session file I/O belongs on the host thread, never the real-time audio thread.
 - `--live` is the only mode that may open an audio device. `--no-tui` intentionally
   selects line-oriented output; omit it when checking the fixed ANSI dashboard.
-- Input selection is the only mandatory keyboard setup for FX100. Startup offers
-  C major/default wake (Enter), custom wake on C major, or custom scale/wake in
-  explicit `--live` mode; C/D/E in the default scale select menu options 1/2/3.
-- Erase is a direct selected-slot command. Scrape low E to stop recording,
-  stop selected-slot playback after wake and selection, or exit after wake. Exit
-  starts the graceful fade immediately, with no extra confirmation or hold.
+- Session new/load and current input selection use the keyboard. New sessions
+  offer C major/default wake (Enter), custom wake on C major, or custom scale/wake
+  in explicit `--live` mode; C/D/E select profile options 1/2/3. Loaded sessions
+  retain their saved control profile without guitar recapture.
+- Erase is a direct selected-slot command. Cancel word = scale degrees 7-6-7-6
+  (C major B-A-B-A), octave-independent, via confirmed note events only; no
+  scrape classifier. It finishes recording at the first detected word onset,
+  cancels an arm, stops selected-slot playback, or exits after wake. Partial
+  words cannot auto-arm a menu slot or cross take/selection contexts. Exit uses
+  the existing fade without an additional confirmation. Saved profiles derive
+  cancel pitches from their scale without a session schema change.
 - The first/master clip may trim outer silence with documented preroll/tail.
   Later synchronized clips must preserve complete master-cycle phase.
 

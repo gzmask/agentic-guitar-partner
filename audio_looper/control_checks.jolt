@@ -46,6 +46,88 @@
     [state (into effects released)]))
 
 
+(defn- phrase
+  [state pitches onset & [spacing delay]]
+  (reduce (fn [[state effects] [index midi]]
+            (let [onset (+ onset (* index (or spacing 8000)))
+                  sample (+ onset (or delay 2500))
+                  [state released] (if (:held state)
+                                     (send state :note-off sample {:id (get-in state [:held :id])
+                                                                   :end-sample onset :reason :pitch-change})
+                                     [state []])
+                  [state emitted] (send state :note-on sample
+                                        {:id (inc (:last-note-id state)) :midi midi :cents 0.0 :onset-sample onset})]
+              [state (into effects (concat released emitted))]))
+          [state []] (map-indexed vector pitches)))
+
+
+(defn- cancel-word
+  [state onset]
+  (phrase state (mapv #(nth (get-in state [:profile :selectors]) (dec %)) [7 6 7 6]) onset))
+
+
+(defn- check-cancel-word!
+  []
+  (let [recording (-> (control/initial-state)
+                      (assoc :sample 100000 :active-recorder 1)
+                      (assoc-in [:slots 0 :record-state] :recording)
+                      (assoc-in [:slots 0 :start-sample] 10000)
+                      (assoc-in [:slots 0 :record-start-id] 7))
+        [stopping effects] (cancel-word recording 101000)
+        [partial partial-effects] (phrase recording [71 69 71] 101000)
+        [wrong wrong-effects] (phrase recording [71 69 72 69] 101000)
+        [octaves _] (phrase recording [59 81 83 45] 101000)
+        [retired retired-effects] (send recording :scrape 110000
+                                        {:loop-id 1 :operation-id 7 :onset-sample 101000})]
+    (check! "cancel word finalizes recording at its FIRST detected note onset"
+            (and (= :record-finalize (:type (first effects)))
+                 (= 101000 (get-in stopping [:slots 0 :pending :boundary-sample]))))
+    (check! "incomplete cancel word never ends recording"
+            (and (= :recording (get-in partial [:slots 0 :record-state])) (empty? partial-effects)))
+    (check! "wrong cancel word never ends recording"
+            (and (= :recording (get-in wrong [:slots 0 :record-state])) (empty? wrong-effects)))
+    (check! "cancel word accepts mixed supported octaves"
+            (= :finalizing (get-in octaves [:slots 0 :record-state])))
+    (check! "retired scrape events cannot stop a take"
+            (and (= :recording (get-in retired [:slots 0 :record-state])) (empty? retired-effects)))
+    (let [[prefix _] (phrase recording [71 69] 101000)
+          [expired _] (control/step prefix {:type :tick :sample (+ 101000 control/command-window 3000)})
+          [suffix suffix-effects] (phrase expired [71 69] (+ (:sample expired) 1000))]
+      (check! "cancel word cannot complete across its timeout"
+              (and (= :recording (get-in suffix [:slots 0 :record-state])) (empty? suffix-effects))))
+    (let [[prefix _] (phrase recording [71 69] 101000)
+          [gap _] (control/step prefix {:type :note-off :sample (inc (:sample prefix))
+                                        :seq (+ 2 (:event-seq prefix)) :id 99 :end-sample 0})
+          [suffix suffix-effects] (phrase gap [71 69] (+ (:sample gap) 1000))]
+      (check! "cancel word cannot complete across a transport gap"
+              (and (= :recording (get-in suffix [:slots 0 :record-state]))
+                   (not-any? #(= :record-finalize (:type %)) suffix-effects))))
+    (let [custom (assoc recording :profile (control/profile [62 64 65 67 69 70 72 74] [74 77 74]))
+          [stopping _] (cancel-word custom 101000)]
+      (check! "cancel degrees follow a restored/custom scale without a new session schema"
+              (= :finalizing (get-in stopping [:slots 0 :record-state]))))
+    (let [custom (assoc recording :profile (control/profile [60 62 64 65 67 69 71 72] [71 67 71]))
+          [woken _] (phrase custom [71 67 71] 101000)]
+      (check! "a distinct custom wake beginning on degree seven still works while recording"
+              (= :ready (get-in woken [:voice :prompt]))))
+    (let [[hops _] (phrase recording [59 71 69 81 59 71 69] 101000)]
+      (check! "legato octave hops do not invent extra word syllables"
+              (= 101000 (get-in hops [:slots 0 :pending :boundary-sample]))))
+    (let [[prefix _] (phrase recording [71] 101000)
+          [replay _] (send prefix :note-on (inc (:sample prefix))
+                           {:id (:last-note-id prefix) :midi 69 :cents 0 :onset-sample 101000})
+          [released _] (send prefix :note-off 109000 {:id (:last-note-id prefix)
+                                                      :end-sample 108000 :reason :pitch-change})
+          [detuned _] (send released :note-on 111000 {:id (inc (:last-note-id released))
+                                                      :midi 69 :cents 36 :onset-sample 108000})
+          [suffix suffix-effects] (phrase detuned [71 69] 117000)]
+      (check! "replayed note IDs cannot advance a cancel word"
+              (= 1 (count (get-in replay [:cancel-phrase :tokens]))))
+      (check! "an out-of-tune syllable breaks the word"
+              (and (= :recording (get-in suffix [:slots 0 :record-state]))
+                   (not-any? #(= :record-finalize (:type %)) suffix-effects))))))
+
+
 (defn- settle
   "Finish logical prompts/guards and cooldowns; never acknowledges audio effects."
   [state]
@@ -92,6 +174,61 @@
       (assoc :master {:origin-sample 0 :length-samples 44100})
       (assoc-in [:slots 0] (merge (control/empty-slot 1)
                                   {:clip-state :ready :buffer :pcm-one :length-samples 44100}))))
+
+
+(defn- check-cancel-menu!
+  []
+  (let [selected (select-loop (control/initial-state) 1)
+        onset (dec (get-in selected [:parser :deadline]))
+        [finished effects] (phrase selected [71 69 71 69] onset 30000)
+        [prefix _] (phrase selected [71] onset)
+        [expired timeout-effects] (control/step prefix {:type :tick :sample (get-in prefix [:cancel-phrase :deadline])})
+        [wrong wrong-effects] (phrase selected [71 69 72 69] onset)]
+    (check! "a cancel word may span the action deadline without auto-arming an empty slot"
+            (and (nil? (:active-recorder finished))
+                 (not-any? #(= :recording-armed (:prompt %)) effects)))
+    (check! "a partial cancel attempt times out instead of default-recording"
+            (and (nil? (:active-recorder expired))
+                 (= :command-cancelled (get-in expired [:voice :prompt]))
+                 (not-any? #(= :recording-armed (:prompt %)) timeout-effects)))
+    (check! "a mismatching cancel suffix never becomes an ordinary record action"
+            (and (nil? (:active-recorder wrong))
+                 (not-any? #(= :recording-armed (:prompt %)) wrong-effects))))
+  (let [playing (assoc-in (select-loop (ready-state) 1) [:slots 0 :play-state] :playing)
+        [stopping _] (phrase playing [71 69 71 69] (dec (get-in playing [:parser :deadline])) 30000)]
+    (check! "a complete word still stops the selected player after the action window"
+            (= :playback-stop (get-in stopping [:slots 0 :pending :type]))))
+  (let [[armed _] (command (control/initial-state) 1 1)
+        [prefix _] (phrase armed [71 69] (+ (:sample armed) 1000))
+        [guarded _] (send prefix :prompt-finished (+ (:sample prefix) 32) {:id (get-in prefix [:voice :id])})
+        [waiting _] (control/step guarded {:type :tick :sample (get-in guarded [:voice :until])})
+        [queued _] (off waiting (+ (:sample waiting) 8000))
+        request (get-in queued [:slots 0 :pending])
+        [recording _] (send queued :record-started (+ (:sample queued) 32)
+                            {:loop-id 1 :operation-id (:id request) :start-sample (:at-sample request)})
+        [cancelled effects] (phrase recording [71 69] (+ (:sample recording) 1000))
+        pending (get-in cancelled [:slots 0 :pending])
+        [ack _] (send cancelled :record-cancelled (+ (:sample cancelled) 32)
+                      {:loop-id 1 :operation-id (:id pending)})]
+    (check! "word ownership survives an armed-to-recording acknowledgement"
+            (and (= :record-start (:type request)) (= :record-cancel (:type pending))
+                 (some #(= :record-cancel (:type %)) effects)
+                 (not-any? #(= :record-finalize (:type %)) effects)))
+    (check! "a word begun while armed cancels that take, even if native recording began meanwhile"
+            (and (nil? (:active-recorder ack)) (= :empty (get-in ack [:slots 0 :clip-state])))))
+  (let [recording (-> (control/initial-state)
+                      (assoc :active-recorder 1)
+                      (assoc-in [:slots 0 :record-state] :recording)
+                      (assoc-in [:slots 0 :record-start-id] 7)
+                      (assoc-in [:slots 0 :start-sample] 0))
+        [prefix _] (phrase recording [71] (- control/capacity-samples 3000))
+        [limited _] (send prefix :record-limit control/capacity-samples
+                          {:loop-id 1 :operation-id 7 :length-samples control/capacity-samples})
+        [suffix effects] (phrase limited [69 71 69] (+ control/capacity-samples 1000))]
+    (check! "capacity takes precedence over an unconfirmed word without retrospective recutting"
+            (and (nil? (:cancel-phrase limited))
+                 (= control/capacity-samples (get-in suffix [:slots 0 :pending :length-samples]))
+                 (not-any? #(= :record-finalize (:type %)) effects)))))
 
 
 (defn- check-profiles!
@@ -189,7 +326,7 @@
     (let [[same _] (control/step selected {:type :note-on :sample (:sample selected)
                                            :seq (:event-seq selected) :id 99 :midi 72})]
       (check! "duplicate engine event is ignored" (= selected same)))
-    (let [[cancelled _] (on selected 83 (+ (:sample selected) 8000))
+    (let [[cancelled _] (on selected 77 (+ (:sample selected) 8000))
           state (settle cancelled)
           suffix (reduce (fn [s midi] (first (note s midi))) state [74 72 74])]
       (check! "cancelled command suffix cannot seed next wake" (nil? (:voice suffix))))))
@@ -244,9 +381,7 @@
                              :start-sample (:at-sample request)})
         recording (settle recording)
         onset (+ (:sample recording) 6000)
-        [stopping stop-effects] (send recording :scrape (+ onset 6000)
-                                     {:loop-id 1 :operation-id (:record-start-id (first (:slots recording)))
-                                      :onset-sample onset})
+        [stopping stop-effects] (cancel-word recording onset)
         request (get-in stopping [:slots 0 :pending])
         [ready _] (send stopping :record-finalized (+ (:sample stopping) 32)
                         {:loop-id 1 :operation-id (:id request) :buffer :pcm-one
@@ -256,7 +391,7 @@
     (check! "other slot rejected while recording"
             (every? #(false? (:enabled? %)) (control/operation-menu recording 2)))
     (check! "note operations disabled during recording" (every? #(false? (:enabled? %)) (control/operation-menu recording 1)))
-    (check! "stop uses scrape onset, not confirmation" (= onset (:boundary-sample request)))
+    (check! "stop uses cancel word onset, not confirmation" (= onset (:boundary-sample request)))
     (check! "first clip asks the native engine for outer-silence trimming"
             (= 1 (:arg (first (filter #(= :record-finalize (:type %)) stop-effects)))))
     (check! "take stays unpublished during finalization"
@@ -282,48 +417,63 @@
                      (assoc :master {:origin-sample 0 :length-samples 44100})
                      (assoc-in [:slots 0 :start-sample] 88200))
           onset (+ (:sample synced) 88200)
-          [stop effects] (send synced :scrape (+ onset 6000)
-                               {:loop-id 1 :operation-id (get-in synced [:slots 0 :record-start-id]) :onset-sample onset})
+          [stop effects] (cancel-word synced onset)
           boundary (get-in stop [:slots 0 :pending :boundary-sample])]
       (check! "synchronized later clips retain the shared cycle"
               (= 0 (:arg (first (filter #(= :record-finalize (:type %)) effects)))))
-      (check! "later stop quantizes at/before scrape onset"
+      (check! "later stop quantizes at/before cancel word onset"
               (and (zero? (mod boundary 44100)) (<= boundary onset))))))
 
 
-(defn- check-scrape-stop!
+(defn- check-cancel-stop!
   []
   (let [recording (-> (control/initial-state)
                       (assoc :sample 100000 :active-recorder 1)
                       (assoc-in [:slots 0 :record-state] :recording)
                       (assoc-in [:slots 0 :start-sample] 10000)
                       (assoc-in [:slots 0 :record-start-id] 7))
-        [stopping effects] (send recording :scrape 110000 {:loop-id 1 :operation-id 7 :onset-sample 101000})
+        [stopping effects] (cancel-word recording 101000)
         pending (get-in stopping [:slots 0 :pending])
-        [stale stale-effects] (send recording :scrape 110000 {:loop-id 1 :operation-id 8 :onset-sample 101000})
-        [bad _] (send recording :scrape 110000 {:loop-id 1 :operation-id 7 :onset-sample 110001})
-        [malformed _] (send recording :scrape 110000 {:loop-id 1 :operation-id 7 :onset-sample "bad"})
-        [ack _] (send stopping :record-finalized 110032 {:loop-id 1 :operation-id (:id pending)
-                                                          :buffer :pcm :length-samples (:length-samples pending)})
+        [stale stale-effects] (send stopping :record-finalized (+ (:sample stopping) 32)
+                                    {:loop-id 1 :operation-id (inc (:id pending)) :buffer :wrong
+                                     :length-samples (:length-samples pending)})
+        [ack _] (send stopping :record-finalized (+ (:sample stopping) 32)
+                      {:loop-id 1 :operation-id (:id pending) :buffer :pcm
+                       :length-samples (:length-samples pending)})
         synced (assoc recording :master {:origin-sample 10000 :length-samples 20000})
-        [later _] (send synced :scrape 110000 {:loop-id 1 :operation-id 7 :onset-sample 101000})
+        [later _] (cancel-word synced 101000)
         speaking (assoc recording :voice {:state :speaking :id 55 :prompt :recording})
-        [prompt-stop prompt-effects] (send speaking :scrape 110000 {:loop-id 1 :operation-id 7 :onset-sample 101000})
+        [prompt-stop prompt-effects] (cancel-word speaking 101000)
         early (assoc recording :master {:origin-sample 10000 :length-samples 200000})
-        [incomplete incomplete-effects] (send early :scrape 110000 {:loop-id 1 :operation-id 7 :onset-sample 101000})]
-    (check! "scrape immediately finalizes active recorder without wake"
+        [incomplete incomplete-effects] (cancel-word early 101000)]
+    (check! "cancel word finalizes active recorder without wake"
             (and (= :record-finalize (:type (first effects))) (= 101000 (:boundary-sample pending))))
-    (check! "scrape finalization remains unpublished until ack"
-            (and (= :empty (get-in stopping [:slots 0 :clip-state])) (= :pcm (get-in ack [:slots 0 :buffer]))))
-    (check! "stale recorder scrape is ignored" (and (= :recording (get-in stale [:slots 0 :record-state])) (empty? stale-effects)))
-    (check! "invalid scrape onset fails closed" (and (= :failed (:status bad)) (= :failed (:status malformed))))
-    (check! "later scrape retains complete master cycles" (= 90000 (get-in later [:slots 0 :pending :boundary-sample])))
-    (check! "scrape cancels a pending prompt before finalization"
+    (check! "cancel finalization remains unpublished until matching ack"
+            (and (= :empty (get-in stopping [:slots 0 :clip-state]))
+                 (= :finalizing (get-in stale [:slots 0 :record-state])) (empty? stale-effects)
+                 (= :pcm (get-in ack [:slots 0 :buffer]))))
+    (check! "later cancel retains complete cycles at FIRST note, not completion"
+            (= 90000 (get-in later [:slots 0 :pending :boundary-sample])))
+    (check! "cancel word cancels a pending prompt before finalization"
             (and (= [:prompt-cancel :record-finalize] (mapv :type prompt-effects))
                  (= 55 (:prompt-id (first prompt-effects))) (nil? (:voice prompt-stop))))
-    (check! "scrape before one complete later cycle does not publish a clip"
+    (check! "cancel before one complete later cycle does not publish a clip"
             (and (= :recording (get-in incomplete [:slots 0 :record-state]))
-                 (not-any? #(= :record-finalize (:type %)) incomplete-effects)))))
+                 (not-any? #(= :record-finalize (:type %)) incomplete-effects)))
+    (let [[prefix _] (phrase recording [71 69] 101000)
+          another (-> prefix (assoc :active-recorder 2)
+                      (assoc-in [:slots 0] (control/empty-slot 1))
+                      (assoc-in [:slots 1 :record-state] :recording)
+                      (assoc-in [:slots 1 :start-sample] 10000)
+                      (assoc-in [:slots 1 :record-start-id] 8))
+          [suffix suffix-effects] (phrase another [71 69] (+ (:sample another) 1000))]
+      (check! "a word begun for another take cannot finalize the current recorder"
+              (and (= :recording (get-in suffix [:slots 1 :record-state]))
+                   (not-any? #(= :record-finalize (:type %)) suffix-effects))))
+    (doseq [onset [200000 "bad"]]
+      (let [[bad _] (send recording :note-on 110000
+                          {:id 1 :midi 71 :cents 0 :onset-sample onset})]
+        (check! "invalid note onset fails closed" (= :failed (:status bad)))))))
 
 
 (defn- check-global-stop!
@@ -331,31 +481,27 @@
   (let [initial (control/initial-state)
         [waking _] (note (first (note (first (note initial 72)) 74)) 72)
         [waking _] (on waking 74 (+ (:sample waking) 8000))
-        [exit effects] (send waking :scrape (+ (:sample waking) 12000)
-                             {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample waking) 1000)})]
-    (check! "wake plus scrape exits even during ready prompt"
+        [exit effects] (cancel-word waking (+ (:sample waking) 1000))]
+    (check! "wake plus cancel word exits even during ready prompt"
             (and (= :exiting (:status exit)) (= :fade-mixer (:type (first effects)))))
     (let [recording (-> waking (assoc :active-recorder 1)
                         (assoc-in [:slots 0 :record-state] :recording)
                         (assoc-in [:slots 0 :start-sample] 0)
                         (assoc-in [:slots 0 :record-start-id] 7))
-          [exit effects] (send recording :scrape (+ (:sample recording) 12000)
-                               {:loop-id 1 :operation-id 7 :onset-sample (+ (:sample recording) 1000)})]
-      (check! "wake plus scrape exits rather than finalizing active recording"
+          [exit effects] (cancel-word recording (+ (:sample recording) 1000))]
+      (check! "wake plus cancel word exits rather than finalizing active recording"
               (and (= :exiting (:status exit)) (= :fade-mixer (:type (first effects)))
                    (= 1 (:discard-recording (first effects)))))))
   (let [initial (control/initial-state)
-        [ignored effects] (send initial :scrape 10000 {:loop-id 0 :operation-id 0 :onset-sample 1000})
+        [ignored effects] (cancel-word initial 1000)
         waking (wake initial)
-        [stale stale-effects] (send waking :scrape (+ (:sample waking) 12000)
-                                    {:loop-id 0 :operation-id 0 :onset-sample 0})]
-    (check! "scrape without wake or recording has no effect" (and (= :running (:status ignored)) (empty? effects)))
-    (check! "scrape beginning before wake completion cannot exit" (and (= :running (:status stale)) (empty? stale-effects))))
+        [stale stale-effects] (phrase (assoc waking :held nil) [71 69 71 69] 0 8000 (+ (:sample waking) 1000))]
+    (check! "cancel word without wake or recording has no effect" (and (= :running (:status ignored)) (empty? effects)))
+    (check! "cancel word beginning before wake completion cannot exit" (and (= :running (:status stale)) (empty? stale-effects))))
   (let [waiting (select-loop (ready-state) 1)
         playing (assoc-in waiting [:slots 0 :play-state] :playing)
-        [stop effects] (send playing :scrape (+ (:sample playing) 12000)
-                             {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample playing) 1000)})]
-    (check! "selected scrape queues playback stop at master boundary"
+        [stop effects] (cancel-word playing (+ (:sample playing) 1000))]
+    (check! "selected cancel word queues playback stop at master boundary"
             (and (= :queued-stop (get-in stop [:slots 0 :play-state]))
                  (= :play-queue (:type (first effects)))
                  (= :playback-stop (:operation (first effects)))
@@ -363,16 +509,15 @@
   (let [queued (first (command (ready-state) 1 2))
         selected (select-loop queued 1)
         start (get-in selected [:slots 0 :pending])
-        [cancelling effects] (send selected :scrape (+ (:sample selected) 10000)
-                                   {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample selected) 1000)})
+        [cancelling effects] (cancel-word selected (+ (:sample selected) 1000))
         cancel (get-in cancelling [:slots 0 :pending])
         [cancelled _] (send cancelling :playback-cancelled (+ (:sample cancelling) 32)
                             {:loop-id 1 :operation-id (:id cancel) :cancelled? true})
         [started _] (send cancelling :playback-started (max (:sample cancelling) (:at-sample start))
                           {:loop-id 1 :operation-id (:id start) :at-sample (:at-sample start)})
         [raced race-effects] (send started :playback-cancelled (+ (:sample started) 32)
-                                    {:loop-id 1 :operation-id (:id cancel) :cancelled? false})]
-    (check! "scrape cancels queued start without claiming it stopped prematurely"
+                                   {:loop-id 1 :operation-id (:id cancel) :cancelled? false})]
+    (check! "cancel word cancels queued start without claiming it stopped prematurely"
             (and (= :playback-cancel (:type (first effects))) (= :queued-stop (get-in cancelling [:slots 0 :play-state]))
                  (= (:id start) (:cancel-operation-id (first effects)))))
     (check! "cancel acknowledgement publishes stopped"
@@ -383,7 +528,7 @@
   (let [selected (select-loop (control/initial-state) 1)
         [before _] (control/step selected {:type :tick :sample (get-in selected [:parser :deadline])})
         [armed effects] (control/step before {:type :tick :sample (+ (get-in selected [:parser :deadline])
-                                                                      control/action-confirmation-grace)})]
+                                                                     control/action-confirmation-grace)})]
     (check! "confirmation grace prevents premature default record" (nil? (:active-recorder before)))
     (check! "empty selected slot defaults to recording after action window"
             (and (= :armed (get-in armed [:slots 0 :record-state]))
@@ -397,7 +542,7 @@
             (= :playback-start (get-in playing [:slots 0 :pending :type]))))
   (let [selected (select-loop (ready-state) 1)
         [state effects] (control/step selected {:type :tick :sample (+ (get-in selected [:parser :deadline])
-                                                                        control/action-confirmation-grace)})]
+                                                                       control/action-confirmation-grace)})]
     (check! "selection timeout never overwrites an existing clip"
             (and (= :pcm-one (get-in state [:slots 0 :buffer]))
                  (not-any? #(= :record-start (:type %)) effects))))
@@ -407,79 +552,50 @@
     (check! "degree 3 erases" (= :buffer-erase (get-in erasing [:slots 0 :pending :type]))))
   (let [[armed _] (command (control/initial-state) 1 1)
         onset (+ (:sample armed) 2000)
-        [cancelled effects] (send armed :scrape (+ onset 8000)
-                                  {:loop-id 0 :operation-id 0 :onset-sample onset})]
-    (check! "scrape cancels an unscheduled armed recording and its prompt"
+        [cancelled effects] (cancel-word armed onset)]
+    (check! "cancel word cancels an unscheduled armed recording and its prompt"
             (and (nil? (:active-recorder cancelled)) (= :empty (get-in cancelled [:slots 0 :clip-state]))
                  (= :prompt-cancel (:type (first effects)))))))
 
 
-(defn- check-fixed-length-recording!
+(defn- check-cancel-length-recording!
   []
   (let [master (ready-state)
-        [asked _] (command master 2 1)
-        waiting (settle asked)
-        menu (control/navigation waiting)
-        [selected _] (note waiting (nth (get-in waiting [:profile :selectors]) 2))
-        armed (settle selected)
-        start (get-in armed [:slots 1 :pending])
-        target (* 3 (get-in master [:master :length-samples]))
-        [recording _] (send armed :record-started (+ (:at-sample start) 32)
+        [armed effects] (command master 2 1)
+        queued (settle armed)
+        start (get-in queued [:slots 1 :pending])
+        [recording _] (send queued :record-started (+ (:at-sample start) 32)
                             {:loop-id 2 :operation-id (:id start) :start-sample (:at-sample start)})
-        limit-sample (+ (:at-sample start) target)
-        [finalizing effects] (send recording :record-limit limit-sample
-                                   {:loop-id 2 :operation-id (:id start) :length-samples target})
+        master-length (get-in master [:master :length-samples])
+        word-onset (+ (:at-sample start) (* 3 master-length) 10000)
+        [finalizing stop-effects] (cancel-word recording word-onset)
         finalize (get-in finalizing [:slots 1 :pending])
-        [ready _] (send finalizing :record-finalized (+ limit-sample 32)
+        [ready _] (send finalizing :record-finalized (+ (:sample finalizing) 32)
                         {:loop-id 2 :operation-id (:id finalize) :buffer :three-cycles
-                         :length-samples target})]
-    (check! "non-master recording asks for cycle count before arming"
-            (= :wait-record-length (:phase (:parser waiting))))
-    (let [selected (select-loop master 2)
-          [auto effects] (control/step selected {:type :tick :sample (+ (get-in selected [:parser :deadline])
-                                                                         control/action-confirmation-grace)})
-          [cancelled cancel-effects] (send auto :scrape (+ (:sample auto) 10000)
-                                           {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample auto) 1000)})]
-      (check! "default recording with a master requests fixed cycle length"
-              (and (= :record-length (:prompt (first effects)))
-                   (= :wait-record-length (get-in auto [:voice :next]))))
-      (check! "scrape cancels cycle selection even during prompt"
-              (and (= :cooldown (get-in cancelled [:parser :phase])) (nil? (:active-recorder cancelled))
-                   (= :prompt-cancel (:type (first cancel-effects))))))
-    (check! "cycle count menu maps scale degrees to one through six T"
-            (= (range 1 7) (map :cycles menu)))
-    (check! "chosen three-T length is scheduled with the recorder"
-            (= target (:length-samples start)))
-    (check! "native limit event finalizes exactly at the selected cycle count"
-            (and (some #(= :record-finalize (:type %)) effects)
-                 (= target (:length-samples finalize))
-                 (= limit-sample (:boundary-sample finalize))))
-    (check! "automatic completion publishes the clip with its actual cycle count"
+                         :length-samples (:length-samples finalize)})]
+    (check! "non-master recording arms without asking for a cycle count"
+            (and (= :recording-armed (:prompt (first effects)))
+                 (= :arm-start (get-in armed [:voice :next]))))
+    (check! "non-master recorder has no fixed target length"
+            (nil? (:length-samples start)))
+    (check! "cancel word chooses the latest complete master-cycle boundary"
+            (and (= (* 3 master-length) (:length-samples finalize))
+                 (= (+ (:at-sample start) (* 3 master-length))
+                    (:boundary-sample finalize))
+                 (some #(= :record-finalize (:type %)) stop-effects)))
+    (check! "finalization publishes the cycle count derived from cancel word timing"
             (and (= :ready (get-in ready [:slots 1 :clip-state]))
                  (= 3 (get-in ready [:slots 1 :record-cycles]))
-                 (= target (get-in ready [:slots 1 :length-samples]))))
-    (let [long-master (assoc master :master {:origin-sample 0 :length-samples (* 30 44100)})
-          long-waiting (assoc-in long-master [:parser :phase] :wait-record-length)
-          limited (control/navigation long-waiting)
-          [asked-too-long _] (command long-master 2 1)
-          too-long-state (settle asked-too-long)
-          [rejected _] (note too-long-state (nth (:selectors (:profile too-long-state)) 4))]
-      (check! "cycle choices exceeding recorder capacity are disabled"
-              (= [true true true true false false] (mapv :enabled? limited)))
-      (check! "an unavailable cycle count is rejected without arming"
-              (and (nil? (:active-recorder rejected))
-                   (= :empty (get-in rejected [:slots 1 :clip-state])))))
+                 (= (* 3 master-length) (get-in ready [:slots 1 :length-samples]))))
+    (let [early-onset (+ (:at-sample start) (dec master-length))
+          [continuing early-effects] (cancel-word recording early-onset)]
+      (check! "cancel word before one complete cycle keeps the recorder running"
+              (and (= :recording (get-in continuing [:slots 1 :record-state]))
+                   (not-any? #(= :record-finalize (:type %)) early-effects))))
     (let [too-large (assoc master :master {:origin-sample 0
                                            :length-samples (inc control/capacity-samples)})]
       (check! "record start is disabled when no complete master cycle fits"
-              (false? (:enabled? (control/policy too-large 2 1)))))
-    (let [[asked _] (command master 2 1)
-          waiting (settle asked)
-          expired (first (control/step waiting {:type :tick
-                                                :sample (get-in waiting [:parser :deadline])}))]
-      (check! "timing out at cycle selection cancels before recorder arming"
-              (and (nil? (:active-recorder expired))
-                   (= :empty (get-in expired [:slots 1 :clip-state])))))))
+              (false? (:enabled? (control/policy too-large 2 1)))))))
 
 
 (defn- check-destructive!
@@ -497,9 +613,8 @@
             (= :empty (get-in erased [:slots 0 :clip-state])))
     (check! "last erased clip resets master" (nil? (:master erased))))
   (let [waiting (settle (wake (control/initial-state)))
-        [exiting _] (send waiting :scrape (+ (:sample waiting) 10000)
-                          {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample waiting) 1000)})]
-    (check! "wake plus scrape begins graceful shutdown" (= :exiting (:status exiting)))
+        [exiting _] (cancel-word waiting (+ (:sample waiting) 1000))]
+    (check! "wake plus cancel word begins graceful shutdown" (= :exiting (:status exiting)))
     (check! "exit ramp is at least 30ms" (>= (get-in exiting [:shutdown :duration-samples]) 1323))))
 
 
@@ -510,8 +625,7 @@
         [playing _] (send queued :playback-started (max (:sample queued) (:at-sample pending))
                           {:loop-id 1 :operation-id (:id pending) :at-sample (:at-sample pending)})
         selected (select-loop playing 1)
-        [stopping _] (send selected :scrape (+ (:sample selected) 10000)
-                           {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample selected) 1000)})
+        [stopping _] (cancel-word selected (+ (:sample selected) 1000))
         stop (get-in stopping [:slots 0 :pending])
         [stopped _] (send stopping :playback-stopped (max (:sample stopping) (:at-sample stop))
                           {:loop-id 1 :operation-id (:id stop) :at-sample (:at-sample stop)})]
@@ -564,21 +678,17 @@
         [queued _] (control/step guarded {:type :tick :sample now})]
     (check! "delayed host never schedules recording in the past"
             (<= now (get-in queued [:slots 0 :pending :at-sample]))))
-  (let [[asked _] (command (ready-state) 2 1)
-        waiting (settle asked)
-        [selected _] (note waiting (first (get-in waiting [:profile :selectors])))
-        queued (settle selected)
+  (let [[armed _] (command (ready-state) 2 1)
+        queued (settle armed)
         now (:sample queued)
         at (get-in queued [:slots 1 :pending :at-sample])
-        [cancelled _] (send queued :scrape (+ (:sample queued) 10000)
-                            {:loop-id 2 :operation-id (get-in queued [:slots 1 :pending :id])
-                             :onset-sample (+ (:sample queued) 1000)})]
-    (check! "later recording requests a master-cycle count before arming"
-            (= :wait-record-length (get-in waiting [:parser :phase])))
+        [cancelled _] (cancel-word queued (+ (:sample queued) 1000))]
+    (check! "later recording arms directly without a cycle-selection phase"
+            (= :record-start (get-in queued [:slots 1 :pending :type])))
     (check! "later recording starts strictly on next shared boundary"
             (and (> at now) (zero? (mod at 44100)) (< (- at now) 44101)))
-    (check! "one selected cycle is sent to the native recorder"
-            (= 44100 (get-in queued [:slots 1 :pending :length-samples])))
+    (check! "later recorder remains open until cancel word"
+            (nil? (get-in queued [:slots 1 :pending :length-samples])))
     (check! "armed recorder can be cancelled without publishing a take"
             (and (= :record-cancel (get-in cancelled [:slots 1 :pending :type]))
                  (= :empty (get-in cancelled [:slots 1 :clip-state])))))
@@ -588,7 +698,7 @@
                       (assoc-in [:slots 0 :start-sample] 0)
                       (assoc-in [:slots 0 :record-start-id] 42))
         [limit _] (send recording :record-limit control/capacity-samples
-                         {:loop-id 1 :operation-id 42 :length-samples control/capacity-samples})
+                        {:loop-id 1 :operation-id 42 :length-samples control/capacity-samples})
         pending (get-in limit [:slots 0 :pending])
         [complete _] (send limit :record-finalized (+ (:sample limit) 32)
                            {:loop-id 1 :operation-id (:id pending) :buffer :max-pcm
@@ -597,7 +707,7 @@
                       {:loop-id 1 :operation-id (:id pending) :buffer :bad
                        :length-samples (inc (:length-samples pending))})
         [early _] (send recording :record-limit 100032
-                         {:loop-id 1 :operation-id 42 :length-samples control/capacity-samples})]
+                        {:loop-id 1 :operation-id 42 :length-samples control/capacity-samples})]
     (check! "maximum is bounded to allocated capacity" (= control/capacity-samples (:length-samples pending)))
     (check! "maximum still waits for finalization ack" (= :empty (get-in limit [:slots 0 :clip-state])))
     (check! "maximum finalization can publish complete take" (= :ready (get-in complete [:slots 0 :clip-state])))
@@ -618,8 +728,7 @@
     (check! "erase affects only selected slot" (= :pcm-two (get-in erased [:slots 1 :buffer])))
     (check! "master survives erasure of its original slot" (= (:master two) (:master erased))))
   (let [waiting (settle (wake (control/initial-state)))
-        exiting (first (send waiting :scrape (+ (:sample waiting) 10000)
-                             {:loop-id 0 :operation-id 0 :onset-sample (+ (:sample waiting) 1000)}))
+        exiting (first (cancel-word waiting (+ (:sample waiting) 1000)))
         [early _] (send exiting :mixer-faded (+ (:sample exiting) 32)
                         {:operation-id (get-in exiting [:shutdown :id])})
         [stale effects] (send exiting :mixer-faded (+ (:sample exiting) 32) {:operation-id 99999})
@@ -678,15 +787,17 @@
 
 (defn check-control!
   []
-  (doseq [[label check] [["scale/wake profiles" check-profiles!]
+  (doseq [[label check] [["cancel-word routing" check-cancel-word!]
+                         ["cancel word menu deadlines and recorder ownership" check-cancel-menu!]
+                         ["scale/wake profiles" check-profiles!]
                          ["reference note lifecycle" check-detector!]
                          ["wake/parser/prompt guards" check-parser!]
                          ["policy/menu state matrix" check-policy!]
                          ["record/finalize policy" check-recording!]
-                         ["scrape stop" check-scrape-stop!]
-                         ["global scrape stop and compact grammar" check-global-stop!]
-                         ["fixed-cycle recording and automatic finalization" check-fixed-length-recording!]
-                         ["direct erase and scrape exit" check-destructive!]
+                         ["cancel word stop" check-cancel-stop!]
+                         ["global cancel word and compact grammar" check-global-stop!]
+                         ["cancel-word cycle recording" check-cancel-length-recording!]
+                         ["direct erase and cancel exit" check-destructive!]
                          ["six-slot playback policy" check-playback!]
                          ["synchronization/capacity" check-boundaries!]
                          ["erase isolation and exit completion" check-exit-completion!]

@@ -1,0 +1,210 @@
+(ns audio-looper.sessions
+  "Versioned session manifests and immutable stereo PCM files. Host-side I/O only;
+  a committed manifest is the sole durable publication point."
+  (:require [audio-looper.control :as control]
+            [audio-looper.csound :as native]
+            [clojure.edn :as edn]
+            [clojure.java.io :as io]))
+
+
+(def default-root
+  (.getCanonicalPath
+    (if-let [override (System/getenv "AUDIO_LOOPER_SESSIONS_DIR")]
+      (io/file override)
+      (io/file (or (.getParent (io/file *file*)) ".") ".." "sessions"))))
+
+
+(defn- fail!
+  [message]
+  (throw (ex-info message {:type :session-error})))
+
+
+(defn- bounded-integer?
+  [value low high]
+  (and (integer? value) (<= low value high)))
+
+
+(defn validate
+  [metadata]
+  (let [{:keys [version id created-at updated-at sample-rate channels profile master tracks]} metadata]
+    (when-not (and (= 1 version) (string? id)
+                   (re-matches #"(?:[0-9]+|[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2})-[a-f0-9-]{36}" id)
+                   (bounded-integer? created-at 0 9007199254740991)
+                   (bounded-integer? updated-at created-at 9007199254740991)
+                   (= 44100 sample-rate) (= 2 channels) (map? profile)
+                   (or (nil? (:name profile)) (and (string? (:name profile)) (<= (count (:name profile)) 128)))
+                   (vector? (:selectors profile)) (= 7 (count (:selectors profile)))
+                   (vector? tracks) (<= (count tracks) 6)
+                   (= (count tracks) (count (set (map :id tracks))))
+                   (if (empty? tracks) (nil? master)
+                       (and (map? master)
+                            (bounded-integer? (:length-samples master) 1 control/capacity-samples))))
+      (fail! "Unsupported or invalid session metadata."))
+    (let [validated (control/profile (conj (:selectors profile) (+ 12 (first (:selectors profile))))
+                                     (get-in profile [:wake :midi]))]
+      (when-not (= validated (dissoc profile :name))
+        (fail! "Session command profile is invalid.")))
+    (doseq [{:keys [id file length-samples]} tracks]
+      (when-not (and (bounded-integer? id 1 6) (string? file)
+                     (re-matches (re-pattern (str "track-" id "-[a-f0-9-]{36}\\.wav")) file)
+                     (bounded-integer? length-samples 1 control/capacity-samples)
+                     (zero? (mod length-samples (:length-samples master))))
+        (fail! "Invalid session track identity, filename, or cycle length.")))
+    metadata))
+
+
+(defn- local-file
+  [directory filename]
+  (let [file (io/file directory filename)]
+    (when-not (= (.getAbsolutePath file) (.getCanonicalPath file))
+      (fail! "Session files may not be symbolic links or escape their directory."))
+    file))
+
+
+(defn read-manifest!
+  [directory]
+  (let [file (local-file directory "session.edn")]
+    (when-not (and (.isFile file) (<= 1 (.length file) 65536))
+      (fail! "Session manifest is missing or exceeds 64 KiB."))
+    ;; Jolt's edn/read drains the reader on its first call. Envelope the bounded
+    ;; input plus an unpredictable sentinel so trailing forms/early brackets
+    ;; cannot silently disappear behind read-string's first-form behavior.
+    (let [sentinel (str (java.util.UUID/randomUUID))
+          forms (edn/read-string (str "[" (slurp file) "\n" (pr-str sentinel) "]"))]
+      (when-not (and (vector? forms) (= 2 (count forms)) (= sentinel (peek forms)))
+        (fail! "Trailing data in session manifest."))
+      (validate (first forms)))))
+
+
+(defn list!
+  [root]
+  (let [directory (io/file (.getCanonicalPath (io/file root)))
+        children (filter #(.isDirectory %) (.listFiles directory))]
+    (when (> (count children) 1000) (fail! "More than 1000 session directories; archive older sessions."))
+    (vec (sort-by #(get-in % [:metadata :updated-at] 0) >
+                  (for [child children]
+                    (try
+                      (let [path (.getCanonicalPath child)]
+                        (when-not (= (.getAbsolutePath child) path)
+                          (fail! "Session directories may not be symbolic links."))
+                        {:directory path :metadata (read-manifest! path)})
+                      (catch Exception error
+                        {:directory (.getPath child) :error (ex-message error)})))))))
+
+
+(defn restore-state
+  "Restore only stable state. Playback/recording, operation IDs, pending effects
+  and old sample clocks never survive restart. Master phase is rebased to zero."
+  [metadata]
+  (validate metadata)
+  (reduce (fn [state {:keys [id file length-samples]}]
+            (assoc-in state [:slots (dec id)]
+                      (merge (control/empty-slot id)
+                             {:clip-state :ready :buffer [:persisted file 0]
+                              :length-samples length-samples :start-sample 0
+                              :record-cycles (quot length-samples (get-in metadata [:master :length-samples]))})))
+          (cond-> (control/initial-state (:profile metadata))
+            (:master metadata) (assoc :master (assoc (:master metadata) :origin-sample 0)))
+          (:tracks metadata)))
+
+
+(defn clips
+  [store]
+  (mapv #(assoc % :file (.getPath (local-file (:directory @store) (:file %))))
+        (get-in @store [:metadata :tracks])))
+
+
+(defn- write-manifest!
+  [directory metadata]
+  (validate metadata)
+  (let [temporary (local-file directory (str ".manifest-" (java.util.UUID/randomUUID) ".tmp"))]
+    (try
+      (spit temporary (str (pr-str metadata) "\n"))
+      (native/commit-file! (.getPath temporary) (.getPath (local-file directory "session.edn")) directory)
+      (finally (.delete temporary)))))
+
+
+(defn close!
+  [store]
+  (when store
+    (locking store
+      (when-not (:closed? @store)
+        (swap! store assoc :closed? true)
+        (native/unlock-session! (:lock @store)))))
+  nil)
+
+
+(defn- claim!
+  [directory]
+  (let [path (.getCanonicalPath (io/file directory))
+        lock (native/lock-session! (.getPath (local-file path ".lock")))]
+    (atom {:directory path :lock lock :closed? false})))
+
+
+(defn open!
+  [directory]
+  (let [store (claim! directory)]
+    (try
+      (swap! store assoc :metadata (read-manifest! (:directory @store)))
+      (doseq [{:keys [file length-samples]} (clips store)]
+        (native/validate-track! file length-samples))
+      store
+      (catch Exception error (close! store) (throw error)))))
+
+
+(defn create!
+  [root profile]
+  (let [root (io/file root)
+        _ (when-not (or (.isDirectory root) (.mkdirs root)) (fail! "Cannot create sessions root."))
+        now (System/currentTimeMillis)
+        ;; libc resolves the real OS timezone even when the hosted runtime falls
+        ;; back to UTC. UUIDs disambiguate same-second/DST collisions.
+        local-time (native/local-timestamp now)
+        id (str local-time "-" (java.util.UUID/randomUUID))
+        directory (io/file root id)
+        _ (when-not (.mkdir directory) (fail! "Cannot create unique session directory."))
+        store (claim! (.getPath directory))
+        metadata {:version 1 :id id :created-at now :updated-at now
+                  :sample-rate 44100 :channels 2 :profile profile :master nil :tracks []}]
+    (try
+      (write-manifest! (:directory @store) metadata)
+      (swap! store assoc :metadata metadata)
+      store
+      (catch Exception error (close! store) (throw error)))))
+
+
+(defn checkpoint!
+  "Called for each accepted reducer transition, BEFORE dispatching later effects.
+  Export only finalized clips; erase commits the manifest before deleting old PCM.
+  On failure the old manifest stays loadable; unreferenced new files are harmless."
+  [store running before after]
+  (when store
+    (locking store
+      (when (:closed? @store) (fail! "Session is closed."))
+      (let [{:keys [directory metadata]} @store
+            previous (into {} (map (juxt :id identity) (:tracks metadata)))
+            tracks (vec
+                     (for [slot (:slots after) :when (= :ready (:clip-state slot))]
+                       (if (and (= (:buffer slot) (get-in before [:slots (dec (:id slot)) :buffer]))
+                                (get previous (:id slot)))
+                         (get previous (:id slot))
+                         (let [filename (str "track-" (:id slot) "-" (java.util.UUID/randomUUID) ".wav")
+                               file (local-file directory filename)
+                               temporary (local-file directory (str "." filename ".tmp"))]
+                           (try
+                             (native/save-track! (:instance running) (:id slot) (.getPath temporary)
+                                                 (long (nth (:buffer slot) 2)) (:length-samples slot))
+                             (native/commit-file! (.getPath temporary) (.getPath file) directory)
+                             {:id (:id slot) :file filename :length-samples (:length-samples slot)}
+                             (finally (.delete temporary)))))))
+            updated (assoc metadata :profile (:profile after)
+                           :master (when (:master after) (select-keys (:master after) [:length-samples]))
+                           :tracks tracks)]
+        (when-not (= metadata updated)
+          (let [updated (assoc updated :updated-at (max (:updated-at metadata) (System/currentTimeMillis)))]
+            (write-manifest! directory updated)
+            (swap! store assoc :metadata updated)
+            (let [retained (set (map :file tracks))]
+              (doseq [track (:tracks metadata) :when (not (retained (:file track)))]
+                (.delete (local-file directory (:file track))))))))))
+  nil)
